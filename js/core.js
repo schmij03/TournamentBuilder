@@ -47,10 +47,25 @@
     koMatchDuration: 10,
     scoreUnit: 'Tore',
     fieldName: 'Feld',
+    placements: false,
+    lunchStart: '',
+    lunchDuration: 45,
+    timerHalves: 1,
+    shiftInterval: 0,
   });
 
   // Einstellungen, die den Zeitplan beeinflussen (dürfen auch während des Turniers geändert werden)
-  const SCHEDULE_KEYS = ['fields', 'startTime', 'matchDuration', 'breakDuration', 'minRest', 'koBreak', 'koMatchDuration'];
+  const SCHEDULE_KEYS = [
+    'fields',
+    'startTime',
+    'matchDuration',
+    'breakDuration',
+    'minRest',
+    'koBreak',
+    'koMatchDuration',
+    'lunchStart',
+    'lunchDuration',
+  ];
 
   let uidCounter = 0;
   function uid(prefix) {
@@ -134,6 +149,11 @@
       koMatchDuration: clampInt(s.koMatchDuration, 1, 300, d.koMatchDuration),
       scoreUnit: text(s.scoreUnit, d.scoreUnit, 20),
       fieldName: text(s.fieldName, d.fieldName, 20),
+      placements: s.placements === undefined ? d.placements : !!s.placements,
+      lunchStart: /^\d{1,2}:\d{2}$/.test(s.lunchStart || '') ? s.lunchStart : '',
+      lunchDuration: clampInt(s.lunchDuration, 0, 300, d.lunchDuration),
+      timerHalves: clampInt(s.timerHalves, 1, 2, d.timerHalves),
+      shiftInterval: clampInt(s.shiftInterval, 0, 60, d.shiftInterval),
     };
   }
 
@@ -145,8 +165,12 @@
       created: Date.now(),
       settings: normalizeSettings({}),
       teams: [],
-      stage: 'setup', // setup | groups | ko
+      stage: 'setup', // setup | groups | ko (KO- bzw. Platzierungsrunde)
       matches: [],
+      places: [], // Schlussränge: [{place, srcs:[{team}|{winner}|{loser}]}]
+      lots: {}, // Losentscheid: teamId -> Zufallszahl
+      timer: null,
+      live: false,
     };
   }
 
@@ -166,7 +190,18 @@
       }));
     t.matches = (Array.isArray(raw.matches) ? raw.matches : []).filter((m) => m && typeof m.id === 'string');
     t.stage = ['setup', 'groups', 'ko'].includes(raw.stage) ? raw.stage : 'setup';
-    if (t.stage === 'setup') t.matches = [];
+    t.places = Array.isArray(raw.places) ? raw.places.filter((p) => p && Number.isInteger(p.place) && Array.isArray(p.srcs)) : [];
+    t.lots = {};
+    if (raw.lots && typeof raw.lots === 'object') {
+      for (const [k, v] of Object.entries(raw.lots)) if (Number.isFinite(v)) t.lots[k] = v;
+    }
+    t.timer = raw.timer && typeof raw.timer === 'object' && typeof raw.timer.matchId === 'string' ? raw.timer : null;
+    t.live = !!raw.live;
+    if (t.stage === 'setup') {
+      t.matches = [];
+      t.places = [];
+      t.timer = null;
+    }
     return t;
   }
 
@@ -178,8 +213,9 @@
     return s.format !== 'ko';
   }
 
+  /** Gibt es eine KO- bzw. Platzierungsrunde? */
   function usesKO(s) {
-    return s.format !== 'groups';
+    return s.format === 'ko' || hasFinals(s);
   }
 
   function teamsByGroup(t) {
@@ -325,15 +361,50 @@
     }
   }
 
+  function lunchWindow(s) {
+    if (!s.lunchStart || !s.lunchDuration) return null;
+    const from = parseTime(s.lunchStart);
+    return { from, to: from + s.lunchDuration };
+  }
+
+  /**
+   * Startzeiten für die Slots 0..maxSlot. Ein Slot, der in die Mittagspause
+   * fallen würde, beginnt erst nach der Pause; alle späteren Slots rücken nach.
+   */
+  function slotTimes(base, maxSlot, step, duration, lunch) {
+    const times = [];
+    let shift = 0;
+    let done = !lunch;
+    for (let k = 0; k <= maxSlot; k++) {
+      let start = base + k * step + shift;
+      if (!done) {
+        if (start >= lunch.to) done = true;
+        else if (start + duration > lunch.from) {
+          shift += lunch.to - start;
+          start = lunch.to;
+          done = true;
+        }
+      }
+      times.push(start);
+    }
+    return times;
+  }
+
   function applyTimes(t) {
     const s = t.settings;
     const base = parseTime(s.startTime);
+    const lunch = lunchWindow(s);
     const group = t.matches.filter((m) => m.phase === 'group');
-    for (const m of group) m.start = base + m.slot * (s.matchDuration + s.breakDuration);
+    if (group.length) {
+      const times = slotTimes(base, Math.max(...group.map((m) => m.slot)), s.matchDuration + s.breakDuration, s.matchDuration, lunch);
+      for (const m of group) m.start = times[m.slot];
+    }
     let koBase = base;
     if (group.length) koBase = Math.max(...group.map((m) => m.start + s.matchDuration)) + s.koBreak;
-    for (const m of t.matches) {
-      if (m.phase === 'ko') m.start = koBase + m.slot * (s.koMatchDuration + s.breakDuration);
+    const ko = t.matches.filter((m) => m.phase === 'ko');
+    if (ko.length) {
+      const times = slotTimes(koBase, Math.max(...ko.map((m) => m.slot)), s.koMatchDuration + s.breakDuration, s.koMatchDuration, lunch);
+      for (const m of ko) m.start = times[m.slot];
     }
   }
 
@@ -398,12 +469,13 @@
     if (errors.length) throw new Error(errors.join('\n'));
     const s = t.settings;
     t.matches = [];
+    t.places = [];
+    t.timer = null;
     if (!usesGroups(s)) {
-      t.matches = buildBracket(
-        t.teams.map((team) => ({ team: team.id, group: null })),
-        { thirdPlace: s.thirdPlace }
-      );
       t.stage = 'ko';
+      const finals = buildFinals(t);
+      t.matches = finals.matches;
+      t.places = finals.places;
     } else {
       fillUnassigned(t);
       const groups = teamsByGroup(t);
@@ -429,26 +501,29 @@
     const errors = validateSetup(t);
     if (errors.length) return { errors };
     const tmp = startTournament(clone(t));
-    const slots = new Set(tmp.matches.map((m) => m.phase + m.slot)).size;
-    let koMatches = 0;
-    if (tmp.settings.format === 'groups_ko') {
-      const q = qualifierCount(tmp);
-      let size = 2;
-      while (size < q) size *= 2;
-      koMatches = q - 1 + (tmp.settings.thirdPlace && q >= 4 ? 1 : 0);
+    const groupMatches = tmp.matches.length;
+    const groupEnd = endTime(tmp);
+    let finalsMatches = 0;
+    if (hasFinals(tmp.settings) && tmp.stage === 'groups') {
+      startFinals(tmp, { force: true });
+      finalsMatches = tmp.matches.filter((m) => m.phase === 'ko').length;
     }
+    const slots = new Set(tmp.matches.map((m) => m.phase + m.slot)).size;
     return {
       errors: [],
-      matchCount: tmp.matches.length,
-      koMatches,
+      matchCount: groupMatches,
+      koMatches: finalsMatches,
       slots,
       start: parseTime(tmp.settings.startTime),
+      groupEnd,
       end: endTime(tmp),
     };
   }
 
   function resetTournament(t) {
     t.matches = [];
+    t.places = [];
+    t.timer = null;
     t.stage = 'setup';
   }
 
@@ -457,7 +532,7 @@
   /* ------------------------------------------------------------------ */
 
   function emptyRow(id) {
-    return { id, played: 0, won: 0, drawn: 0, lost: 0, scored: 0, conceded: 0, diff: 0, points: 0, rank: 0, tied: false };
+    return { id, played: 0, won: 0, drawn: 0, lost: 0, scored: 0, conceded: 0, diff: 0, points: 0, rank: 0, tied: false, byLot: false };
   }
 
   function addResult(row, own, other, s) {
@@ -506,6 +581,14 @@
   function rankRows(rows, criteria, ctx, tieCounter) {
     if (rows.length <= 1) return rows;
     if (!criteria.length) {
+      // Losentscheid, falls für alle Beteiligten ein Los gezogen wurde
+      const lots = ctx.lots || {};
+      if (rows.every((r) => Number.isFinite(lots[r.id])) && new Set(rows.map((r) => lots[r.id])).size === rows.length) {
+        rows.forEach((r) => {
+          r.byLot = true;
+        });
+        return rows.slice().sort((a, b) => lots[b.id] - lots[a.id]);
+      }
       const tieId = tieCounter.next++;
       rows.forEach((r) => {
         r.tied = true;
@@ -527,7 +610,7 @@
     return out;
   }
 
-  function computeTable(teamIds, matches, settings) {
+  function computeTable(teamIds, matches, settings, lots) {
     const rows = new Map(teamIds.map((id) => [id, emptyRow(id)]));
     const relevant = matches.filter((m) => rows.has(m.home) && rows.has(m.away));
     for (const m of relevant) {
@@ -535,7 +618,7 @@
       addResult(rows.get(m.home), m.scoreH, m.scoreA, settings);
       addResult(rows.get(m.away), m.scoreA, m.scoreH, settings);
     }
-    const ranked = rankRows([...rows.values()], settings.tiebreakers, { matches: relevant, settings }, { next: 0 });
+    const ranked = rankRows([...rows.values()], settings.tiebreakers, { matches: relevant, settings, lots }, { next: 0 });
     let rank = 0;
     ranked.forEach((r, i) => {
       const prev = ranked[i - 1];
@@ -551,13 +634,27 @@
       computeTable(
         ids,
         t.matches.filter((m) => m.phase === 'group' && m.group === gi),
-        t.settings
+        t.settings,
+        t.lots
       )
     );
   }
 
+  /** Zieht ein Los für die angegebenen Teams (bei nicht auflösbarem Gleichstand). */
+  function drawLots(t, ids, rng) {
+    const random = rng || Math.random;
+    const order = shuffle(ids, random);
+    order.forEach((id, i) => {
+      t.lots[id] = order.length - i + random() * 0.001;
+    });
+  }
+
+  function clearLots(t, ids) {
+    for (const id of ids) delete t.lots[id];
+  }
+
   /* ------------------------------------------------------------------ */
-  /* KO-Phase                                                            */
+  /* KO- und Platzierungsrunde                                           */
   /* ------------------------------------------------------------------ */
 
   /** Setzreihenfolge für ein Feld der Grösse 2^k, z. B. 8 → [1,8,4,5,2,7,3,6]. */
@@ -601,83 +698,102 @@
     return slots;
   }
 
-  /**
-   * Erstellt den KO-Baum. `entries` ist die Setzliste [{team, group}], Platz 1 zuerst.
-   * Bei einer Teamzahl, die keine Zweierpotenz ist, erhalten die bestgesetzten Teams ein Freilos.
-   */
-  function buildBracket(entries, opts) {
-    const options = opts || {};
+  /** Setzliste [{team, group}] → Startplätze eines Baums (Zweierpotenz, null = Freilos). */
+  function seededSources(entries) {
     const n = entries.length;
-    if (n < 2) throw new Error('Für die KO-Phase braucht es mindestens 2 Teams.');
+    if (n === 0) return [];
+    if (n === 1) return [{ team: entries[0].team }];
     let size = 2;
     while (size < n) size *= 2;
-    const totalRounds = Math.log2(size);
-    const slots = avoidSameGroup(seedOrder(size).map((seed) => (seed <= n ? entries[seed - 1] : null)));
+    return avoidSameGroup(seedOrder(size).map((seed) => (seed <= n ? entries[seed - 1] : null))).map((e) =>
+      e ? { team: e.team } : null
+    );
+  }
 
-    const matches = [];
-    let order = 0;
-    let sources = [];
-    for (let r = 0; r < totalRounds; r++) {
-      const name = koRoundName(size / Math.pow(2, r));
-      const next = [];
-      const roundMatches = [];
-      if (r === 0) {
-        for (let i = 0; i < size; i += 2) {
-          const a = slots[i];
-          const b = slots[i + 1];
-          if (a && b) {
-            const m = newMatch({ phase: 'ko', round: r, homeSrc: { team: a.team }, awaySrc: { team: b.team }, deps: [] });
-            roundMatches.push(m);
-            next.push({ winner: m.id });
-          } else {
-            next.push({ team: (a || b).team }); // Freilos
-          }
-        }
-      } else {
-        for (let i = 0; i < sources.length; i += 2) {
-          const homeSrc = sources[i];
-          const awaySrc = sources[i + 1];
-          const deps = [homeSrc.winner, awaySrc.winner].filter(Boolean);
-          const m = newMatch({ phase: 'ko', round: r, homeSrc, awaySrc, deps });
-          roundMatches.push(m);
-          next.push({ winner: m.id });
-        }
-      }
-      roundMatches.forEach((m, i) => {
-        m.roundName = name;
-        m.label = roundMatches.length > 1 ? `${name} ${i + 1}` : name;
-      });
-      // Spiel um Platz 3 vor dem Final einplanen
-      if (r === totalRounds - 1 && options.thirdPlace && totalRounds >= 2) {
-        const semis = matches.filter((m) => m.round === totalRounds - 2);
-        if (semis.length === 2) {
-          matches.push(
-            newMatch({
-              phase: 'ko',
-              round: r,
-              thirdPlace: true,
-              roundName: 'Spiel um Platz 3',
-              label: 'Spiel um Platz 3',
-              homeSrc: { loser: semis[0].id },
-              awaySrc: { loser: semis[1].id },
-              deps: [semis[0].id, semis[1].id],
-              order: order++,
-            })
-          );
-        }
-      }
-      roundMatches.forEach((m) => {
-        m.order = order++;
-        matches.push(m);
-      });
-      sources = next;
+  /**
+   * Baut rekursiv einen Turnierbaum für die Plätze firstPlace … firstPlace+n-1.
+   * Sieger spielen um die vorderen, Verlierer (falls ausgespielt) um die hinteren Plätze.
+   * mode.full: alle Plätze ausspielen; mode.thirdPlace: im Hauptbaum Spiel um Platz 3.
+   */
+  function buildPlayoff(ctx, srcs, firstPlace, round, mode, isMain) {
+    const alive = srcs.filter(Boolean);
+    if (!alive.length) return;
+    if (alive.length === 1) {
+      ctx.places.push({ place: firstPlace, srcs: [alive[0]] });
+      return;
     }
-    return matches;
+    const size = srcs.length;
+    const lastPlace = firstPlace + alive.length - 1;
+    let roundName;
+    if (isMain) roundName = koRoundName(size);
+    else if (alive.length === 2) roundName = 'Spiel um Platz ' + firstPlace;
+    else roundName = `Platz ${firstPlace}–${lastPlace}: ${koRoundName(size)}`;
+
+    const winners = [];
+    const losers = [];
+    const roundMatches = [];
+    for (let i = 0; i < size; i += 2) {
+      const a = srcs[i];
+      const b = srcs[i + 1];
+      if (a && b) {
+        const deps = [a.winner || a.loser, b.winner || b.loser].filter(Boolean);
+        const m = newMatch({
+          phase: 'ko',
+          round,
+          homeSrc: a,
+          awaySrc: b,
+          deps,
+          bracket: firstPlace,
+          bracketTitle: isMain ? 'KO-Phase' : alive.length === 2 ? 'Spiel um Platz ' + firstPlace : `Platz ${firstPlace}–${lastPlace}`,
+          roundName,
+          thirdPlace: !isMain && firstPlace === 3 && alive.length === 2,
+        });
+        roundMatches.push(m);
+        winners.push({ winner: m.id });
+        losers.push({ loser: m.id });
+      } else {
+        winners.push(a || b);
+        losers.push(null);
+      }
+    }
+    roundMatches.forEach((m, i) => {
+      m.label = roundMatches.length > 1 ? `${roundName} ${i + 1}` : roundName;
+      ctx.matches.push(m);
+    });
+
+    const winnerCount = winners.filter(Boolean).length;
+    buildPlayoff(ctx, winners, firstPlace, round + 1, mode, isMain);
+    const loserList = losers.filter(Boolean);
+    if (!loserList.length) return;
+    const playLosers = mode.full || (isMain && mode.thirdPlace && size === 4);
+    if (playLosers) buildPlayoff(ctx, losers, firstPlace + winnerCount, round + 1, mode, false);
+    else ctx.places.push({ place: firstPlace + winnerCount, srcs: loserList });
+  }
+
+  /** Klassischer KO-Baum (für Tests und einfache Aufrufe). */
+  function buildBracket(entries, opts) {
+    if (entries.length < 2) throw new Error('Für die KO-Phase braucht es mindestens 2 Teams.');
+    const ctx = { matches: [], places: [] };
+    buildPlayoff(ctx, seededSources(entries), 1, 0, { full: !!(opts && opts.full), thirdPlace: !!(opts && opts.thirdPlace) }, true);
+    orderFinals(ctx);
+    return ctx.matches;
+  }
+
+  function orderFinals(ctx) {
+    // Pro Runde zuerst die Platzierungsspiele, das Spiel um Platz 1 zuletzt
+    ctx.matches.sort((a, b) => a.round - b.round || b.bracket - a.bracket);
+    ctx.matches.forEach((m, i) => {
+      m.order = i;
+    });
   }
 
   function qualifierCount(t) {
     const s = t.settings;
     return s.groupCount * s.advancePerGroup + s.extraQualifiers;
+  }
+
+  function hasFinals(s) {
+    return s.format === 'groups_ko' || (s.format === 'groups' && s.placements && s.groupCount > 1);
   }
 
   function sortByPerformance(rows) {
@@ -691,46 +807,92 @@
     );
   }
 
+  /** Teams pro Gruppenrang über alle Gruppen, jeweils nach Leistung pro Spiel sortiert. */
+  function rankTiers(t) {
+    const tables = groupTables(t);
+    const maxLen = Math.max(0, ...tables.map((rows) => rows.length));
+    const tiers = [];
+    for (let rank = 0; rank < maxLen; rank++) {
+      tiers.push(
+        sortByPerformance(tables.map((rows, gi) => rows[rank] && Object.assign({}, rows[rank], { group: gi })).filter(Boolean))
+      );
+    }
+    return tiers;
+  }
+
   /** Setzliste für die KO-Phase aus den Gruppentabellen. */
   function koEntries(t) {
+    return splitQualifiers(t).qualified;
+  }
+
+  function splitQualifiers(t) {
     const s = t.settings;
-    if (!usesGroups(s)) return t.teams.map((team) => ({ team: team.id, group: null }));
-    const tables = groupTables(t);
-    const entries = [];
-    for (let rank = 0; rank < s.advancePerGroup; rank++) {
-      const tier = tables.map((rows, gi) => rows[rank] && Object.assign({}, rows[rank], { group: gi })).filter(Boolean);
-      entries.push(...sortByPerformance(tier));
+    if (!usesGroups(s)) return { qualified: t.teams.map((team) => ({ team: team.id, group: null })), rest: [] };
+    const tiers = rankTiers(t);
+    const qualified = [];
+    const rest = [];
+    tiers.forEach((tier, rank) => {
+      if (rank < s.advancePerGroup) qualified.push(...tier);
+      else if (rank === s.advancePerGroup && s.extraQualifiers > 0) {
+        qualified.push(...tier.slice(0, s.extraQualifiers));
+        rest.push(...tier.slice(s.extraQualifiers));
+      } else rest.push(...tier);
+    });
+    const map = (r) => ({ team: r.id, group: r.group });
+    return { qualified: qualified.map(map), rest: rest.map(map) };
+  }
+
+  /** Spiele und Schlussränge der KO- bzw. Platzierungsrunde. */
+  function buildFinals(t) {
+    const s = t.settings;
+    const ctx = { matches: [], places: [] };
+    const full = { full: true, thirdPlace: true };
+    if (s.format === 'ko') {
+      const entries = t.teams.map((team) => ({ team: team.id, group: null }));
+      buildPlayoff(ctx, seededSources(entries), 1, 0, { full: s.placements, thirdPlace: s.thirdPlace }, true);
+    } else if (s.format === 'groups_ko') {
+      const { qualified, rest } = splitQualifiers(t);
+      buildPlayoff(ctx, seededSources(qualified), 1, 0, { full: s.placements, thirdPlace: s.thirdPlace }, true);
+      if (s.placements && rest.length) buildPlayoff(ctx, seededSources(rest), qualified.length + 1, 0, full, false);
+    } else if (hasFinals(s)) {
+      // Gruppen ohne KO: Gleichplatzierte der Gruppen spielen um ihre Ränge
+      let place = 1;
+      rankTiers(t).forEach((tier, rank) => {
+        const entries = tier.map((r) => ({ team: r.id, group: r.group }));
+        buildPlayoff(ctx, seededSources(entries), place, 0, full, rank === 0 && entries.length > 1);
+        place += entries.length;
+      });
     }
-    if (s.extraQualifiers > 0) {
-      const candidates = tables
-        .map((rows, gi) => rows[s.advancePerGroup] && Object.assign({}, rows[s.advancePerGroup], { group: gi }))
-        .filter(Boolean);
-      entries.push(...sortByPerformance(candidates).slice(0, s.extraQualifiers));
-    }
-    return entries.map((r) => ({ team: r.id, group: r.group }));
+    orderFinals(ctx);
+    return ctx;
   }
 
   function groupPhaseComplete(t) {
     return t.matches.filter((m) => m.phase === 'group').every(isPlayed);
   }
 
-  function startKO(t, opts) {
-    if (t.settings.format !== 'groups_ko') throw new Error('Dieses Turnier hat keine KO-Phase nach den Gruppen.');
-    if (t.stage !== 'groups') throw new Error('Die KO-Phase kann nur nach der Gruppenphase gestartet werden.');
+  function startFinals(t, opts) {
+    if (!hasFinals(t.settings)) throw new Error('Für dieses Turnier ist keine Finalrunde eingestellt.');
+    if (t.stage !== 'groups') throw new Error('Die Finalrunde kann nur nach der Gruppenphase gestartet werden.');
     if (!groupPhaseComplete(t) && !(opts && opts.force)) {
       throw new Error('Es sind noch nicht alle Gruppenspiele gespielt.');
     }
-    const entries = koEntries(t);
-    t.matches = t.matches.filter((m) => m.phase !== 'ko').concat(buildBracket(entries, { thirdPlace: t.settings.thirdPlace }));
+    const finals = buildFinals(t);
+    if (!finals.matches.length && !finals.places.length) throw new Error('Es gibt keine Spiele für die Finalrunde.');
+    t.matches = t.matches.filter((m) => m.phase !== 'ko').concat(finals.matches);
+    t.places = finals.places;
     t.stage = 'ko';
+    if (t.timer && !t.matches.some((m) => m.id === t.timer.matchId)) t.timer = null;
     scheduleAll(t);
     resolveKO(t);
     return t;
   }
 
-  function resetKO(t) {
-    if (t.settings.format !== 'groups_ko') return resetTournament(t);
+  function resetFinals(t) {
+    if (!usesGroups(t.settings)) return resetTournament(t);
     t.matches = t.matches.filter((m) => m.phase !== 'ko');
+    t.places = [];
+    if (t.timer && !t.matches.some((m) => m.id === t.timer.matchId)) t.timer = null;
     t.stage = 'groups';
   }
 
@@ -747,6 +909,14 @@
     return w === m.home ? m.away : m.home;
   }
 
+  function resolveSource(src, byId) {
+    if (!src) return null;
+    if (src.team) return src.team;
+    const sm = byId.get(src.winner || src.loser);
+    if (!sm) return null;
+    return src.winner ? matchWinner(sm) : matchLoser(sm);
+  }
+
   /**
    * Bestimmt die Teams der KO-Spiele aus den Resultaten der Vorrunden.
    * Ändert sich dadurch die Besetzung eines bereits gespielten Spiels, wird dessen Resultat gelöscht.
@@ -755,17 +925,10 @@
     const ko = t.matches.filter((m) => m.phase === 'ko').sort((a, b) => a.order - b.order);
     if (!ko.length) return t;
     const byId = new Map(ko.map((m) => [m.id, m]));
-    const resolveSrc = (src) => {
-      if (!src) return null;
-      if (src.team) return src.team;
-      const sm = byId.get(src.winner || src.loser);
-      if (!sm) return null;
-      return src.winner ? matchWinner(sm) : matchLoser(sm);
-    };
     for (let guard = 0; guard < ko.length + 2; guard++) {
       for (const m of ko) {
-        m.home = resolveSrc(m.homeSrc);
-        m.away = resolveSrc(m.awaySrc);
+        m.home = resolveSource(m.homeSrc, byId);
+        m.away = resolveSource(m.awaySrc, byId);
       }
       let changed = false;
       for (const m of ko) {
@@ -799,7 +962,7 @@
     const m = t.matches.find((x) => x.id === matchId);
     if (!m) throw new Error('Spiel nicht gefunden.');
     if (m.phase === 'group' && t.stage !== 'groups') {
-      throw new Error('Die Gruppenphase ist abgeschlossen. Setze zuerst die KO-Phase zurück, um Gruppenresultate zu ändern.');
+      throw new Error('Die Gruppenphase ist abgeschlossen. Setze zuerst die Finalrunde zurück, um Gruppenresultate zu ändern.');
     }
     const h = parseScore(scoreH);
     const a = parseScore(scoreA);
@@ -826,28 +989,18 @@
     return { total, played };
   }
 
-  /** Schlussrangliste: [{place, teams:[id]}] oder null, falls noch offen. */
+  /** Schlussrangliste: [{place, teams:[id]}] oder null, solange nicht alles entschieden ist. */
   function finalRanking(t) {
     const s = t.settings;
-    if (t.stage === 'ko') {
-      const ko = t.matches.filter((m) => m.phase === 'ko');
-      const lastRound = Math.max(...ko.map((m) => m.round));
-      const final = ko.find((m) => m.round === lastRound && !m.thirdPlace);
-      if (!final || !matchWinner(final)) return null;
-      const result = [
-        { place: 1, teams: [matchWinner(final)] },
-        { place: 2, teams: [matchLoser(final)] },
-      ];
-      const third = ko.find((m) => m.thirdPlace);
-      if (third) {
-        if (matchWinner(third)) {
-          result.push({ place: 3, teams: [matchWinner(third)] }, { place: 4, teams: [matchLoser(third)] });
-        }
-      } else {
-        const semiLosers = ko.filter((m) => m.round === lastRound - 1).map(matchLoser).filter(Boolean);
-        if (semiLosers.length) result.push({ place: 3, teams: semiLosers });
+    if (t.stage === 'ko' && t.places.length) {
+      const byId = new Map(t.matches.filter((m) => m.phase === 'ko').map((m) => [m.id, m]));
+      const out = [];
+      for (const p of t.places) {
+        const teams = p.srcs.map((src) => resolveSource(src, byId));
+        if (teams.some((x) => !x)) return null;
+        out.push({ place: p.place, teams });
       }
-      return result;
+      return out.sort((a, b) => a.place - b.place);
     }
     if (t.stage === 'groups' && s.format === 'groups' && s.groupCount === 1 && groupPhaseComplete(t)) {
       return groupTables(t)[0].map((r) => ({ place: r.rank, teams: [r.id] }));
@@ -857,8 +1010,152 @@
 
   function isFinished(t) {
     if (t.stage === 'setup') return false;
-    if (t.stage === 'ko') return !!finalRanking(t);
-    return t.settings.format === 'groups' && groupPhaseComplete(t);
+    if (t.stage === 'ko') return t.matches.filter((m) => m.phase === 'ko').every(isPlayed) && !!finalRanking(t);
+    return t.settings.format === 'groups' && !hasFinals(t.settings) && groupPhaseComplete(t);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Spieluhr                                                            */
+  /* ------------------------------------------------------------------ */
+
+  function matchMinutes(t, m) {
+    return m && m.phase === 'ko' ? t.settings.koMatchDuration : t.settings.matchDuration;
+  }
+
+  function createTimer(t, matchId, owner) {
+    const m = t.matches.find((x) => x.id === matchId);
+    if (!m) throw new Error('Spiel nicht gefunden.');
+    return {
+      matchId,
+      phase: 'game',
+      durationMs: matchMinutes(t, m) * 60000,
+      running: false,
+      startedAt: null,
+      elapsedMs: 0,
+      halftimeDone: false,
+      owner: owner || null,
+    };
+  }
+
+  function timerElapsed(tm, now) {
+    if (!tm) return 0;
+    return Math.max(0, tm.elapsedMs + (tm.running && Number.isFinite(tm.startedAt) ? now - tm.startedAt : 0));
+  }
+
+  function timerRemaining(tm, now) {
+    return Math.max(0, tm.durationMs - timerElapsed(tm, now));
+  }
+
+  function timerStart(tm, now, owner) {
+    if (tm.running) return;
+    if (tm.elapsedMs >= tm.durationMs) return;
+    tm.running = true;
+    tm.startedAt = now;
+    if (owner) tm.owner = owner;
+  }
+
+  function timerPause(tm, now) {
+    if (!tm.running) return;
+    tm.elapsedMs = timerElapsed(tm, now);
+    tm.running = false;
+    tm.startedAt = null;
+  }
+
+  function timerAdjust(tm, now, deltaMs) {
+    const elapsed = timerElapsed(tm, now);
+    tm.durationMs = Math.max(elapsed + 1000, tm.durationMs + deltaMs, 1000);
+  }
+
+  /** Die Spiele, die im selben Zeitfenster laufen wie das gewählte Spiel. */
+  function slotMatches(t, matchId) {
+    const m = t.matches.find((x) => x.id === matchId);
+    if (!m) return [];
+    return t.matches.filter((x) => x.phase === m.phase && x.start === m.start).sort((a, b) => a.field - b.field);
+  }
+
+  function nextSlotMatch(t, matchId) {
+    const m = t.matches.find((x) => x.id === matchId);
+    if (!m) return null;
+    const later = t.matches
+      .filter((x) => x.start > m.start || (x.start === m.start && x.phase !== m.phase && x.phase === 'ko'))
+      .sort((a, b) => a.start - b.start || a.field - b.field);
+    return later.find((x) => !isPlayed(x)) || later[0] || null;
+  }
+
+  function timerBreak(t, now) {
+    const tm = t.timer;
+    if (!tm) return;
+    Object.assign(tm, {
+      phase: 'break',
+      durationMs: Math.max(1, t.settings.breakDuration) * 60000,
+      elapsedMs: 0,
+      running: true,
+      startedAt: now,
+      halftimeDone: true,
+    });
+  }
+
+  function timerNext(t, owner) {
+    const tm = t.timer;
+    if (!tm) return;
+    const next = nextSlotMatch(t, tm.matchId);
+    t.timer = next ? createTimer(t, next.id, owner || tm.owner) : null;
+  }
+
+  /**
+   * Prüft Übergänge der Spieluhr (Halbzeit, Spielende, Ende der Wechselpause).
+   * Gibt die eingetretenen Ereignisse zurück und passt t.timer an.
+   */
+  function timerTick(t, now) {
+    const tm = t.timer;
+    if (!tm || !tm.running) return [];
+    const s = t.settings;
+    const el = timerElapsed(tm, now);
+    if (tm.phase === 'game') {
+      if (s.timerHalves === 2 && !tm.halftimeDone && el >= tm.durationMs / 2 && el < tm.durationMs) {
+        tm.elapsedMs = Math.round(tm.durationMs / 2);
+        tm.running = false;
+        tm.startedAt = null;
+        tm.halftimeDone = true;
+        return ['halftime'];
+      }
+      if (el >= tm.durationMs) {
+        if (s.breakDuration > 0) timerBreak(t, now);
+        else {
+          tm.elapsedMs = tm.durationMs;
+          tm.running = false;
+          tm.startedAt = null;
+        }
+        return ['end'];
+      }
+      return [];
+    }
+    if (el >= tm.durationMs) {
+      timerNext(t);
+      return ['break-end'];
+    }
+    return [];
+  }
+
+  /** Bezeichnung des aktuellen Abschnitts der Spieluhr. */
+  function timerPhaseLabel(t, now) {
+    const tm = t.timer;
+    if (!tm) return '';
+    if (tm.phase === 'break') return 'Wechselpause';
+    const el = timerElapsed(tm, now);
+    if (el >= tm.durationMs) return 'Spielende';
+    if (t.settings.timerHalves === 2) {
+      if (tm.halftimeDone && !tm.running && Math.abs(el - tm.durationMs / 2) < 1000) return 'Halbzeit · Seitenwechsel';
+      return tm.halftimeDone ? '2. Halbzeit' : '1. Halbzeit';
+    }
+    return el === 0 && !tm.running ? 'Bereit' : 'Spielzeit';
+  }
+
+  function formatClock(ms) {
+    const total = Math.ceil(ms / 1000);
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
   }
 
   return {
@@ -879,6 +1176,7 @@
     normalizeTournament,
     usesGroups,
     usesKO,
+    hasFinals,
     teamsByGroup,
     fillUnassigned,
     drawGroups,
@@ -886,6 +1184,8 @@
     scheduleMatches,
     scheduleAll,
     applyTimes,
+    slotTimes,
+    lunchWindow,
     endTime,
     validateSetup,
     startTournament,
@@ -893,13 +1193,19 @@
     resetTournament,
     computeTable,
     groupTables,
+    drawLots,
+    clearLots,
     seedOrder,
     buildBracket,
+    buildFinals,
     koEntries,
+    splitQualifiers,
     qualifierCount,
     groupPhaseComplete,
-    startKO,
-    resetKO,
+    startFinals,
+    startKO: startFinals,
+    resetFinals,
+    resetKO: resetFinals,
     resolveKO,
     matchWinner,
     matchLoser,
@@ -907,5 +1213,18 @@
     progress,
     finalRanking,
     isFinished,
+    createTimer,
+    timerElapsed,
+    timerRemaining,
+    timerStart,
+    timerPause,
+    timerAdjust,
+    timerBreak,
+    timerNext,
+    timerTick,
+    timerPhaseLabel,
+    slotMatches,
+    nextSlotMatch,
+    formatClock,
   };
 });

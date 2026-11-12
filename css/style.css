@@ -1057,7 +1057,10 @@ textarea.input {
   flex: none;
 }
 
-.b-round h3 {
+.b-round h4 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 600;
   font-size: 1rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -1126,6 +1129,98 @@ textarea.input {
   border-top: 1px solid var(--line);
 }
 
+/* ---------- Platzierungsbäume ---------- */
+
+.b-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.b-section + .b-section {
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+  margin-top: 6px;
+}
+
+.b-title {
+  color: var(--court);
+}
+
+.card .bracket-wrap {
+  padding: 4px 0 6px;
+}
+
+.b-singles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 230px), 1fr));
+  gap: 14px;
+}
+
+.b-single {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.b-single h4 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.b-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.pair-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pair-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border-radius: var(--radius-s);
+}
+
+.pair-label {
+  font-size: 0.8rem;
+  min-width: 9em;
+}
+
+.rest-ranking {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 200px), 1fr));
+  gap: 4px 16px;
+  color: var(--muted);
+}
+
+.rest-ranking span {
+  display: inline-block;
+  min-width: 2.2em;
+  font-weight: 600;
+}
+
 /* ---------- Schlussrangliste ---------- */
 
 .podium {
@@ -1164,6 +1259,282 @@ textarea.input {
 
 .podium-gold {
   font-size: 2rem !important;
+}
+
+/* ---------- Losentscheid, Mittagspause, Live ---------- */
+
+.lot {
+  color: var(--court);
+  font-weight: 700;
+  font-size: 0.75em;
+  margin-left: 3px;
+}
+
+.tie-note {
+  font-size: 0.88rem;
+  justify-content: space-between;
+}
+
+.lunch-divider {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-radius: var(--radius-s);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-weight: 600;
+  text-align: center;
+}
+
+.pill-live {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.pill-live::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+
+/* ---------- Spieluhr ---------- */
+
+.timer-pick {
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  margin-top: 3px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.b-meta .timer-pick {
+  margin: 0;
+}
+
+.timer-pick:hover {
+  color: var(--fg);
+  border-color: var(--court);
+}
+
+.timer-pick.is-on {
+  background: var(--court);
+  border-color: var(--court);
+  color: var(--court-ink);
+}
+
+.match.is-timed,
+.b-match.is-timed {
+  box-shadow: inset 0 0 0 2px var(--court);
+}
+
+body.has-timer .page {
+  padding-bottom: 190px;
+}
+
+.timer-bar {
+  position: fixed;
+  z-index: 40;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--fg);
+  color: var(--bg);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.2);
+}
+
+.tb-inner {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding-block: 10px 12px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: 'info clock' 'controls controls';
+  align-items: center;
+  gap: 6px 18px;
+  position: relative;
+}
+
+.tb-info {
+  grid-area: info;
+  min-width: 0;
+}
+
+.tb-phase {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+}
+
+.phase-break .tb-phase,
+.phase-break .bm-timer-phase {
+  color: var(--ok);
+}
+
+.tb-match {
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
+.tb-match .muted {
+  color: inherit;
+  opacity: 0.7;
+}
+
+.tb-clock {
+  grid-area: clock;
+  font-family: var(--font-display);
+  font-size: clamp(2.4rem, 7vw, 3.4rem);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.tb-clock.is-low,
+.bm-timer-clock.is-low {
+  color: var(--accent);
+}
+
+.tb-controls {
+  grid-area: controls;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.timer-bar .btn {
+  border-color: transparent;
+  background: rgba(127, 140, 155, 0.22);
+  color: inherit;
+}
+
+.timer-bar .btn:hover:not(:disabled) {
+  background: rgba(127, 140, 155, 0.38);
+}
+
+.timer-bar .btn-primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.timer-bar .btn-primary:hover:not(:disabled) {
+  background: var(--accent);
+}
+
+.timer-bar .icon-btn {
+  color: inherit;
+  margin-left: auto;
+}
+
+.tb-progress {
+  height: 4px;
+  background: rgba(127, 140, 155, 0.3);
+}
+
+.tb-progress span {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+}
+
+.phase-break .tb-progress span {
+  background: var(--ok);
+}
+
+.tb-flash {
+  position: absolute;
+  bottom: calc(100% + 14px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--font-display);
+  font-size: 1.6rem;
+  font-weight: 700;
+  padding: 6px 16px;
+  border-radius: var(--radius-s);
+  animation: flash-in 0.2s ease-out;
+}
+
+@keyframes flash-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.bm-panel.bm-timer {
+  background: var(--fg);
+  color: var(--bg);
+  border-color: var(--fg);
+  position: relative;
+}
+
+.bm-timer-phase {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+}
+
+.bm-timer-clock {
+  font-family: var(--font-display);
+  font-size: clamp(4rem, 9vw, 9rem);
+  font-weight: 700;
+  line-height: 0.95;
+}
+
+.bm-timer-flash {
+  font-family: var(--font-display);
+  font-size: 2em;
+  font-weight: 700;
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-radius: var(--radius-s);
+  padding: 4px 14px;
+  text-align: center;
+}
+
+.bm-timer-matches {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bm-timer-matches li {
+  display: flex;
+  flex-direction: column;
+  font-weight: 600;
+}
+
+.bm-timer-matches small {
+  font-weight: 500;
+  opacity: 0.7;
 }
 
 /* ---------- Dialoge & Meldungen ---------- */
@@ -1456,6 +1827,14 @@ body.is-beamer::before {
   .form-grid-3 {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+
+  .m-meta .timer-pick {
+    margin: 0 0 0 auto;
+  }
+
+  .tb-flash {
+    font-size: 1.2rem;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1482,6 +1861,8 @@ body.is-beamer::before {
   .btn,
   .icon-btn,
   #toast-root,
+  .timer-bar,
+  .timer-pick,
   .callout {
     display: none !important;
   }
@@ -1506,5 +1887,15 @@ body.is-beamer::before {
 
   .slot {
     break-inside: avoid;
+  }
+}
+
+body.has-timer #toast-root {
+  bottom: calc(180px + env(safe-area-inset-bottom, 0px));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tb-flash {
+    animation: none;
   }
 }

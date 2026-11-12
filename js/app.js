@@ -23,7 +23,7 @@
 
   let storageOk = true;
   let store = loadStore();
-  let ui = Object.assign({ tab: 'teams', filter: 'all', team: 'all', openOnly: false }, loadUi());
+  let ui = Object.assign({ tab: 'teams', filter: 'all', team: 'all', openOnly: false, sound: true }, loadUi());
   ui.beamer = BEAMER_WINDOW;
   let renderQueued = false;
 
@@ -75,8 +75,8 @@
 
   function saveUi() {
     try {
-      const { tab, filter, team, openOnly } = ui;
-      localStorage.setItem(UI_KEY, JSON.stringify({ tab, filter, team, openOnly }));
+      const { tab, filter, team, openOnly, sound } = ui;
+      localStorage.setItem(UI_KEY, JSON.stringify({ tab, filter, team, openOnly, sound }));
     } catch (e) {
       /* egal */
     }
@@ -110,6 +110,11 @@
   /** Führt eine Änderung aus, speichert und zeichnet neu. */
   function mutate(fn, opts) {
     const t = current();
+    if (isReadOnly(t)) {
+      toast('Dieses Live-Turnier kannst du nur ansehen.', 'error');
+      queueRender();
+      return false;
+    }
     try {
       fn(t);
     } catch (e) {
@@ -119,6 +124,7 @@
     }
     C.resolveKO(t);
     save();
+    pushLive(t);
     if (opts && opts.defer) queueRender();
     else render();
     return true;
@@ -174,9 +180,13 @@
     return t.settings.fieldName + ' ' + m.field;
   }
 
+  function finalsName(t) {
+    return t.settings.format === 'groups' ? 'Platzierungsspiele' : 'KO-Phase';
+  }
+
   function stageLabel(t) {
     if (C.isFinished(t)) return 'Abgeschlossen';
-    return { setup: 'Vorbereitung', groups: 'Gruppenphase', ko: 'KO-Phase' }[t.stage];
+    return { setup: 'Vorbereitung', groups: 'Gruppenphase', ko: finalsName(t) }[t.stage];
   }
 
   function toast(text, kind) {
@@ -187,6 +197,9 @@
     setTimeout(() => el.classList.add('toast-out'), 3600);
     setTimeout(() => el.remove(), 4000);
   }
+
+  const CLOCK_ICON =
+    '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><circle cx="12" cy="13" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 9v4l3 2M9 2h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
 
   const LOGO =
     '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">' +
@@ -290,7 +303,7 @@
       ['schedule', 'Spielplan'],
     ];
     if (C.usesGroups(s)) tabs.push(['tables', 'Tabellen']);
-    if (C.usesKO(s)) tabs.push(['ko', 'KO-Phase']);
+    if (C.usesKO(s)) tabs.push(['ko', s.format === 'groups' ? 'Finalrunde' : 'KO-Phase']);
     return tabs;
   }
 
@@ -308,7 +321,10 @@
 
     document.title = t.name + ' · TournamentBuilder';
     document.body.classList.toggle('is-beamer', !!ui.beamer);
+    document.body.classList.toggle('has-timer', !!t.timer && !ui.beamer);
     app.innerHTML = ui.beamer ? renderBeamer(t) : renderMain(t);
+    attachLive();
+    updateTimerDisplays(t, Date.now());
 
     if (focusKey && !modalState) {
       const el = app.querySelector(`[data-key="${CSS.escape(focusKey)}"]`);
@@ -327,6 +343,7 @@
     const tabs = availableTabs(t);
     if (!tabs.some(([k]) => k === ui.tab)) ui.tab = 'teams';
     const list = Object.values(store.tournaments).sort((a, b) => b.created - a.created);
+    const remoteOnly = live.list.filter((x) => !store.tournaments[x.id]).sort((a, b) => b.updated - a.updated);
     const prog = C.progress(t);
     const pct = prog.total ? Math.round((prog.played / prog.total) * 100) : 0;
 
@@ -345,7 +362,14 @@
           <div class="switcher">
             <label class="sr-only" for="tour-select">Turnier wählen</label>
             <select id="tour-select" class="input input-compact" data-change="switch">
-              ${list.map((x) => `<option value="${esc(x.id)}"${x.id === t.id ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}
+              ${list.map((x) => `<option value="${esc(x.id)}"${x.id === t.id ? ' selected' : ''}>${esc(x.name)}${x.live ? ' (live)' : ''}</option>`).join('')}
+              ${
+                remoteOnly.length
+                  ? `<optgroup label="Live-Turniere von anderen Geräten">${remoteOnly
+                      .map((x) => `<option value="live:${esc(x.id)}">${esc(x.name)}</option>`)
+                      .join('')}</optgroup>`
+                  : ''
+              }
             </select>
           </div>
           <div class="top-actions">
@@ -354,6 +378,13 @@
             <button type="button" class="btn btn-ghost" data-action="export">Export</button>
             <button type="button" class="btn btn-ghost" data-action="import">Import</button>
             <button type="button" class="btn btn-ghost" data-action="delete">Löschen</button>
+            ${
+              live.db
+                ? t.live
+                  ? '<button type="button" class="btn btn-ghost" data-action="live-stop">Live beenden</button>'
+                  : '<button type="button" class="btn btn-ghost" data-action="live-start" title="Turnier mit anderen Geräten synchronisieren">Live teilen</button>'
+                : ''
+            }
             <button type="button" class="btn btn-court" data-action="beamer">Beamer</button>
           </div>
         </div>
@@ -365,6 +396,7 @@
           <input id="tour-name" class="title-input" data-field="name" data-key="tour-name" maxlength="80" value="${esc(t.name)}">
           <div class="hero-meta">
             <span class="pill pill-${C.isFinished(t) ? 'done' : t.stage}">${esc(stageLabel(t))}</span>
+            ${liveStatus(t)}
             <span class="meta-text">${t.teams.length} Teams · ${esc(C.FORMATS[t.settings.format])}</span>
             ${
               prog.total
@@ -385,8 +417,13 @@
             .join('')}
         </nav>
         <main class="content">${content}</main>
-        <footer class="foot">Alle Daten bleiben in diesem Browser gespeichert. Für einen anderen Computer: Export und Import.</footer>
-      </div>`;
+        <footer class="foot">${
+          t.live
+            ? 'Live-Turnier: Änderungen erscheinen auf allen Geräten, die diese Seite geöffnet haben.'
+            : 'Alle Daten bleiben in diesem Browser gespeichert. Für einen anderen Computer: Export und Import' + (live.db ? ' oder «Live teilen».' : '.')
+        }</footer>
+      </div>
+      ${renderTimerBar(t)}`;
   }
 
   /* ------------------------------------------------------------------ */
@@ -475,13 +512,14 @@
 
   const LOCKS = {
     structure: ['format', 'groupCount', 'legs'],
-    ko: ['advancePerGroup', 'extraQualifiers', 'thirdPlace'],
+    ko: ['advancePerGroup', 'extraQualifiers', 'thirdPlace', 'placements'],
     ranking: ['pointsWin', 'pointsDraw', 'pointsLoss', 'tiebreakers'],
   };
 
   function isLocked(t, key) {
     if (LOCKS.structure.includes(key)) return t.stage !== 'setup';
     if (LOCKS.ko.includes(key)) return t.stage === 'ko' || (t.settings.format === 'ko' && t.stage !== 'setup');
+    if (t.live && live.readOnly) return true;
     if (LOCKS.ranking.includes(key)) return t.stage === 'ko';
     return false;
   }
@@ -535,7 +573,23 @@
           </div>
         </section>
         ${
-          C.usesKO(s)
+          s.format === 'groups'
+            ? `<section class="card">
+                <h2>Platzierungsspiele</h2>
+                <div class="field field-check">
+                  <input id="set-placements" type="checkbox" data-setting="placements"${s.placements ? ' checked' : ''}${isLocked(t, 'placements') || s.groupCount < 2 ? ' disabled' : ''}>
+                  <label for="set-placements">Nach der Gruppenphase alle Plätze ausspielen</label>
+                </div>
+                <p class="hint">${
+                  s.groupCount < 2
+                    ? 'Braucht mindestens 2 Gruppen.'
+                    : 'Die Gruppenersten spielen um Platz 1, die Gruppenzweiten um Platz 3 usw. So hat jedes Team ein Finalspiel.'
+                }</p>
+              </section>`
+            : ''
+        }
+        ${
+          s.format !== 'groups'
             ? `<section class="card">
                 <h2>KO-Phase</h2>
                 <div class="form-grid">
@@ -545,7 +599,12 @@
                     <input id="set-thirdPlace" type="checkbox" data-setting="thirdPlace"${s.thirdPlace ? ' checked' : ''}${isLocked(t, 'thirdPlace') ? ' disabled' : ''}>
                     <label for="set-thirdPlace">Spiel um Platz 3</label>
                   </div>
+                  <div class="field field-check">
+                    <input id="set-placements" type="checkbox" data-setting="placements"${s.placements ? ' checked' : ''}${isLocked(t, 'placements') ? ' disabled' : ''}>
+                    <label for="set-placements">Alle Plätze ausspielen</label>
+                  </div>
                 </div>
+                ${s.placements ? `<p class="hint">Auch die Verlierer spielen weiter um ihre Plätze${s.format === 'groups_ko' ? ', und die nicht qualifizierten Teams spielen ihre Plätze unter sich aus' : ''}. So hat jedes Team gleich viele Spiele in der Finalrunde.</p>` : ''}
                 ${s.format === 'groups_ko' ? `<p class="hint">Es kommen ${C.qualifierCount(t)} Teams in die KO-Phase. Teams aus derselben Gruppe treffen in der ersten Runde nicht aufeinander.</p>` : ''}
               </section>`
             : ''
@@ -592,8 +651,19 @@
             ${numField(t, 'breakDuration', 'Wechselpause (Min.)', 0, 120)}
             ${numField(t, 'minRest', 'Mindestpause pro Team (Runden)', 0, 10, '0 = Teams dürfen direkt hintereinander spielen.')}
             ${C.usesKO(s) ? numField(t, 'koMatchDuration', 'Spieldauer KO (Min.)', 1, 300) : ''}
-            ${s.format === 'groups_ko' ? numField(t, 'koBreak', 'Pause vor KO-Phase (Min.)', 0, 600) : ''}
+            ${C.hasFinals(s) ? numField(t, 'koBreak', 'Pause vor Finalrunde (Min.)', 0, 600) : ''}
+            ${textField(t, 'lunchStart', 'Mittagspause ab', 'time', 'Leer lassen = keine Mittagspause')}
+            ${s.lunchStart ? numField(t, 'lunchDuration', 'Mittagspause (Min.)', 0, 300) : ''}
           </div>
+          ${s.lunchStart ? '<button type="button" class="btn btn-ghost btn-small" data-action="clear-lunch">Mittagspause entfernen</button>' : ''}
+        </section>
+        <section class="card">
+          <h2>Spieluhr</h2>
+          <div class="form-grid">
+            ${selectField(t, 'timerHalves', 'Spielabschnitte', [[1, 'Durchgehend'], [2, '2 Halbzeiten mit Seitenwechsel']])}
+            ${numField(t, 'shiftInterval', 'Wechselsignal alle … Min.', 0, 60, '0 = aus. Z. B. 2 für Linienwechsel im Unihockey.')}
+          </div>
+          <p class="hint">Die Uhr startest du im Spielplan mit «Uhr» beim gewünschten Spiel. Sie läuft die Spieldauer (${s.matchDuration} Min.${C.usesKO(s) ? `, Finalrunde ${s.koMatchDuration} Min.` : ''}) herunter, danach die Wechselpause (${s.breakDuration} Min.) und springt dann zum nächsten Spiel.</p>
         </section>
         <section class="card">
           <h2>Bezeichnungen</h2>
@@ -610,7 +680,7 @@
   /* ------------------------------------------------------------------ */
 
   function scoreInputs(t, m, names, readOnly) {
-    const locked = (m.phase === 'group' && t.stage !== 'groups') || !m.home || !m.away;
+    const locked = (m.phase === 'group' && t.stage !== 'groups') || !m.home || !m.away || isReadOnly(t);
     const h = sideName(t, m, 'h', names).text;
     const a = sideName(t, m, 'a', names).text;
     if (readOnly) {
@@ -642,8 +712,12 @@
       ['m-team', known ? '' : 'is-tbd', w && w === id ? 'is-winner' : '', played && !w && m.phase === 'group' ? 'is-draw' : '']
         .filter(Boolean)
         .join(' ');
-    return `<div class="match${played ? ' is-played' : ''}" data-match="${esc(m.id)}">
-        <div class="m-meta"><span class="m-field">${esc(fieldLabel(t, m))}</span><span class="m-tag">${esc(matchTag(t, m))}</span></div>
+    const timerOn = t.timer && t.timer.matchId === m.id;
+    const timerBtn = readOnly
+      ? ''
+      : `<button type="button" class="timer-pick${timerOn ? ' is-on' : ''}" data-action="timer-select" data-id="${esc(m.id)}" aria-pressed="${!!timerOn}" title="Spieluhr für dieses Spiel">${CLOCK_ICON}<span>Uhr</span></button>`;
+    return `<div class="match${played ? ' is-played' : ''}${timerOn ? ' is-timed' : ''}" data-match="${esc(m.id)}">
+        <div class="m-meta"><span class="m-field">${esc(fieldLabel(t, m))}</span><span class="m-tag">${esc(matchTag(t, m))}</span>${timerBtn}</div>
         <div class="${cls(m.home, h.known)} m-home">${esc(h.text)}</div>
         ${scoreInputs(t, m, names, readOnly)}
         <div class="${cls(m.away, a.known)} m-away">${esc(a.text)}</div>
@@ -668,6 +742,7 @@
     if (!ranking) return '';
     const medal = ['gold', 'silver', 'bronze'];
     const top = ranking.filter((r) => r.place <= 3);
+    const rest = ranking.filter((r) => r.place > 3);
     return `<section class="card podium-card${big ? ' podium-big' : ''}">
         <h2>Schlussrangliste</h2>
         <ol class="podium">
@@ -680,11 +755,10 @@
             .join('')}
         </ol>
         ${
-          ranking.length > 3
-            ? `<p class="hint">${ranking
-                .filter((r) => r.place > 3)
-                .map((r) => `${r.place}. ${r.teams.map((id) => esc(names.get(id))).join(' / ')}`)
-                .join(' · ')}</p>`
+          rest.length
+            ? `<ol class="rest-ranking">${rest
+                .map((r) => `<li><span class="tabular">${r.place}.</span> ${r.teams.map((id) => esc(names.get(id))).join(' / ')}</li>`)
+                .join('')}</ol>`
             : ''
         }
       </section>`;
@@ -702,11 +776,11 @@
             <div class="callout callout-warn"><strong>Bitte zuerst ergänzen:</strong><ul>${p.errors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul></div>
           </section>`;
       }
-      const fmtLabel = s.format === 'ko' ? 'Ende KO-Phase' : 'Ende Gruppenphase';
+      const fmtLabel = p.koMatches || s.format === 'ko' ? 'Ende (ca.)' : 'Ende Gruppenphase';
       return `<section class="card start-card">
           <h2>Bereit zum Start</h2>
           <dl class="stats">
-            <div><dt>Spiele</dt><dd class="tabular">${p.matchCount}${p.koMatches ? ` <small>+ ${p.koMatches} KO</small>` : ''}</dd></div>
+            <div><dt>Spiele</dt><dd class="tabular">${p.matchCount}${p.koMatches ? ` <small>+ ${p.koMatches} Finalrunde</small>` : ''}</dd></div>
             <div><dt>Spielrunden</dt><dd class="tabular">${p.slots}</dd></div>
             <div><dt>Beginn</dt><dd class="tabular">${C.formatTime(p.start)}</dd></div>
             <div><dt>${fmtLabel}</dt><dd class="tabular">${C.formatTime(p.end)}</dd></div>
@@ -721,7 +795,7 @@
       if (s.groupCount > 1) for (let g = 0; g < s.groupCount; g++) filterOpts.push(['g' + g, C.groupName(g)]);
       else filterOpts.push(['g0', 'Gruppenspiele']);
     }
-    if (t.matches.some((m) => m.phase === 'ko')) filterOpts.push(['ko', 'KO-Phase']);
+    if (t.matches.some((m) => m.phase === 'ko')) filterOpts.push(['ko', finalsName(t)]);
     if (!filterOpts.some(([k]) => k === ui.filter)) ui.filter = 'all';
     if (ui.team !== 'all' && !names.has(ui.team)) ui.team = 'all';
 
@@ -734,18 +808,24 @@
     }
 
     let stageAction = '';
-    if (t.stage === 'groups' && s.format === 'groups_ko') {
+    if (t.stage === 'groups' && C.hasFinals(s)) {
       stageAction = C.groupPhaseComplete(t)
-        ? `<div class="callout callout-ok">Alle Gruppenspiele sind gespielt. <button type="button" class="btn btn-primary" data-action="start-ko">KO-Phase starten</button></div>`
+        ? `<div class="callout callout-ok">Alle Gruppenspiele sind gespielt. <button type="button" class="btn btn-primary" data-action="start-ko">${esc(finalsName(t))} starten</button></div>`
         : '';
     }
 
     let lastPhase = null;
+    let lastStart = null;
+    const lunch = C.lunchWindow(s);
     const list = slots
       .map((slot) => {
         let divider = '';
-        if (slot.phase !== lastPhase && lastPhase !== null) divider = '<h3 class="phase-divider">KO-Phase</h3>';
+        if (slot.phase !== lastPhase && lastPhase !== null) divider = `<h3 class="phase-divider">${esc(finalsName(t))}</h3>`;
+        if (lunch && lastStart !== null && lastStart < lunch.from && slot.start >= lunch.to) {
+          divider += `<div class="lunch-divider tabular">Mittagspause ${C.formatTime(lunch.from)}–${C.formatTime(lunch.to)}</div>`;
+        }
         lastPhase = slot.phase;
+        lastStart = slot.start;
         return `${divider}<div class="slot">
             <div class="slot-time tabular">${C.formatTime(slot.start)}</div>
             <div class="slot-matches">${slot.items.map((m) => matchRow(t, m, names, false)).join('')}</div>
@@ -772,8 +852,8 @@
           </div>
           <div class="toolbar-actions">
             ${EMBEDDED ? '' : '<button type="button" class="btn btn-ghost" data-action="print">Drucken</button>'}
-            ${t.stage === 'groups' && s.format === 'groups_ko' && !C.groupPhaseComplete(t) ? '<button type="button" class="btn btn-ghost" data-action="start-ko">KO-Phase vorzeitig starten</button>' : ''}
-            ${t.stage === 'ko' && s.format === 'groups_ko' ? '<button type="button" class="btn btn-ghost" data-action="reset-ko">KO-Phase zurücksetzen</button>' : ''}
+            ${t.stage === 'groups' && C.hasFinals(s) && !C.groupPhaseComplete(t) ? `<button type="button" class="btn btn-ghost" data-action="start-ko">${esc(finalsName(t))} vorzeitig starten</button>` : ''}
+            ${t.stage === 'ko' && C.usesGroups(s) ? `<button type="button" class="btn btn-ghost" data-action="reset-ko">${esc(finalsName(t))} zurücksetzen</button>` : ''}
             <button type="button" class="btn btn-ghost btn-danger-text" data-action="reset">Turnier zurücksetzen</button>
           </div>
         </div>
@@ -801,7 +881,7 @@
             .map((r, i) => {
               const cls = ko ? (i < s.advancePerGroup ? 'q' : i === s.advancePerGroup && s.extraQualifiers > 0 ? 'q2' : '') : '';
               return `<tr class="${cls}">
-                <td class="num tabular">${r.rank}${r.tied && anyPlayed ? '<span class="tie" title="Gleichstand nicht aufgelöst">=</span>' : ''}</td>
+                <td class="num tabular">${r.rank}${r.tied && anyPlayed ? '<span class="tie" title="Gleichstand nicht aufgelöst">=</span>' : ''}${r.byLot ? '<span class="lot" title="Durch Los entschieden">L</span>' : ''}</td>
                 <td class="team-cell">${esc(names.get(r.id))}</td>
                 <td class="num tabular">${r.played}</td>
                 ${compact ? '' : `<td class="num tabular">${r.won}</td><td class="num tabular">${r.drawn}</td><td class="num tabular">${r.lost}</td>`}
@@ -813,6 +893,31 @@
             .join('')}
         </tbody>
       </table></div>`;
+  }
+
+  /** Hinweise und Knöpfe für Gleichstände, die nur das Los entscheiden kann. */
+  function tieNotes(t, rows, names, gm) {
+    if (!rows.some((r) => r.played)) return '';
+    const locked = t.stage !== 'groups' || isReadOnly(t);
+    const groups = new Map();
+    rows.filter((r) => r.tied).forEach((r) => {
+      if (!groups.has(r.tieGroup)) groups.set(r.tieGroup, []);
+      groups.get(r.tieGroup).push(r.id);
+    });
+    const notes = [];
+    for (const ids of groups.values()) {
+      notes.push(`<div class="callout callout-warn tie-note">
+          <span>Gleichstand: ${ids.map((id) => esc(names.get(id))).join(', ')}.${gm.every(C.isPlayed) ? '' : ' Es sind noch Spiele offen.'}</span>
+          ${locked ? '' : `<button type="button" class="btn btn-small" data-action="draw-lot" data-ids="${esc(ids.join(','))}">Los ziehen</button>`}
+        </div>`);
+    }
+    const lotted = rows.filter((r) => r.byLot).map((r) => r.id);
+    if (lotted.length) {
+      notes.push(`<div class="callout tie-note"><span>Durch Los entschieden (L): ${lotted.map((id) => esc(names.get(id))).join(' vor ')}.</span>
+          ${locked ? '' : `<button type="button" class="btn btn-small btn-ghost" data-action="clear-lot" data-ids="${esc(lotted.join(','))}">Los aufheben</button>`}
+        </div>`);
+    }
+    return notes.join('');
   }
 
   function renderTables(t) {
@@ -834,6 +939,7 @@
             return `<section class="card">
                 <h2>${s.groupCount > 1 ? esc(C.groupName(gi)) : 'Tabelle'} <span class="count">${gm.filter(C.isPlayed).length}/${gm.length}</span></h2>
                 ${standingsTable(t, rows, gi, names, false)}
+                ${tieNotes(t, rows, names, gm)}
               </section>`;
           })
           .join('')}
@@ -844,79 +950,129 @@
   /* KO-Phase                                                            */
   /* ------------------------------------------------------------------ */
 
+  function bracketCard(t, m, names, readOnly) {
+    const h = sideName(t, m, 'h', names);
+    const a = sideName(t, m, 'a', names);
+    const w = C.matchWinner(m);
+    const timerOn = t.timer && t.timer.matchId === m.id;
+    const line = (side, info, id) => {
+      const val = side === 'h' ? m.scoreH : m.scoreA;
+      const score = readOnly
+        ? `<span class="b-score tabular">${C.isPlayed(m) ? val : ''}</span>`
+        : `<input type="number" inputmode="numeric" min="0" max="999" class="score-input tabular" id="b${side}-${esc(m.id)}" data-key="b${side}-${esc(m.id)}" data-score="${side}" data-id="${esc(m.id)}" value="${val === null ? '' : esc(val)}" aria-label="${esc(t.settings.scoreUnit)} ${esc(info.text)}"${!m.home || !m.away || isReadOnly(t) ? ' disabled' : ''}>`;
+      return `<div class="b-line${w && w === id ? ' is-winner' : ''}${info.known ? '' : ' is-tbd'}"><span class="b-name">${esc(info.text)}</span>${score}</div>`;
+    };
+    return `<div class="b-match${C.isPlayed(m) ? ' is-played' : ''}${timerOn ? ' is-timed' : ''}" data-match="${esc(m.id)}">
+        <div class="b-meta tabular"><span>${C.formatTime(m.start)} · ${esc(fieldLabel(t, m))}</span>${
+          readOnly
+            ? ''
+            : `<button type="button" class="timer-pick${timerOn ? ' is-on' : ''}" data-action="timer-select" data-id="${esc(m.id)}" aria-pressed="${!!timerOn}" title="Spieluhr für dieses Spiel">${CLOCK_ICON}<span>Uhr</span></button>`
+        }</div>
+        ${line('h', h, m.home)}${line('a', a, m.away)}
+        ${winnerSelect(t, m, names, readOnly)}
+      </div>`;
+  }
+
+  /** KO-Baum: Hauptbaum, Platzierungsbäume und einzelne Platzierungsspiele. */
   function bracket(t, names, readOnly) {
     const ko = t.matches.filter((m) => m.phase === 'ko').sort((a, b) => a.order - b.order);
-    const rounds = [];
+    const brackets = new Map();
     for (const m of ko) {
-      if (m.thirdPlace) continue;
-      (rounds[m.round] = rounds[m.round] || []).push(m);
+      const key = m.bracket || 1;
+      if (!brackets.has(key)) brackets.set(key, []);
+      brackets.get(key).push(m);
     }
-    const third = ko.find((m) => m.thirdPlace);
-    const byes = ko
-      .filter((m) => m.round === 1)
-      .flatMap((m) => [m.homeSrc, m.awaySrc])
-      .filter((src) => src && src.team)
-      .map((src) => names.get(src.team));
-
-    const card = (m) => {
-      const h = sideName(t, m, 'h', names);
-      const a = sideName(t, m, 'a', names);
-      const w = C.matchWinner(m);
-      const line = (side, info, id) => {
-        const val = side === 'h' ? m.scoreH : m.scoreA;
-        const score = readOnly
-          ? `<span class="b-score tabular">${C.isPlayed(m) ? val : ''}</span>`
-          : `<input type="number" inputmode="numeric" min="0" max="999" class="score-input tabular" id="b${side}-${esc(m.id)}" data-key="b${side}-${esc(m.id)}" data-score="${side}" data-id="${esc(m.id)}" value="${val === null ? '' : esc(val)}" aria-label="${esc(t.settings.scoreUnit)} ${esc(info.text)}"${!m.home || !m.away ? ' disabled' : ''}>`;
-        return `<div class="b-line${w && w === id ? ' is-winner' : ''}${info.known ? '' : ' is-tbd'}"><span class="b-name">${esc(info.text)}</span>${score}</div>`;
-      };
-      return `<div class="b-match${C.isPlayed(m) ? ' is-played' : ''}" data-match="${esc(m.id)}">
-          <div class="b-meta tabular">${C.formatTime(m.start)} · ${esc(fieldLabel(t, m))}</div>
-          ${line('h', h, m.home)}${line('a', a, m.away)}
-          ${winnerSelect(t, m, names, readOnly)}
-        </div>`;
-    };
-
-    return `<div class="bracket-wrap"><div class="bracket">
-        ${rounds
-          .map(
-            (ms, r) => `<div class="b-round">
-              <h3>${esc(ms[0].roundName)}</h3>
-              <div class="b-matches">${ms.map(card).join('')}</div>
-              ${r === 0 && byes.length ? `<p class="hint">Freilos: ${byes.map(esc).join(', ')}</p>` : ''}
-            </div>`
-          )
-          .join('')}
-        ${third ? `<div class="b-round b-third"><h3>Spiel um Platz 3</h3><div class="b-matches">${card(third)}</div></div>` : ''}
-      </div></div>`;
+    const keys = [...brackets.keys()].sort((a, b) => a - b);
+    const singles = [];
+    const sections = [];
+    for (const key of keys) {
+      const ms = brackets.get(key);
+      const roundsUsed = [...new Set(ms.map((m) => m.round))].sort((a, b) => a - b);
+      if (ms.length === 1 && key !== 1) {
+        singles.push(ms[0]);
+        continue;
+      }
+      const firstRound = roundsUsed[0];
+      const byes =
+        key === 1
+          ? ms
+              .filter((m) => m.round === firstRound + 1)
+              .flatMap((m) => [m.homeSrc, m.awaySrc])
+              .filter((src) => src && src.team)
+              .map((src) => names.get(src.team))
+          : [];
+      const title = key === 1 ? (t.settings.format === 'groups' ? 'Spiel um Platz 1' : 'Hauptrunde') : ms[0].bracketTitle;
+      sections.push(`<div class="b-section">
+          ${keys.length > 1 ? `<h3 class="b-title">${esc(title)}</h3>` : ''}
+          <div class="bracket-wrap"><div class="bracket">
+            ${roundsUsed
+              .map((r, i) => {
+                const roundMs = ms.filter((m) => m.round === r);
+                return `<div class="b-round">
+                  <h4>${esc(roundMs[0].roundName.replace(/^Platz \d+–\d+: /, ''))}</h4>
+                  <div class="b-matches">${roundMs.map((m) => bracketCard(t, m, names, readOnly)).join('')}</div>
+                  ${i === 0 && byes.length ? `<p class="hint">Freilos: ${byes.map(esc).join(', ')}</p>` : ''}
+                </div>`;
+              })
+              .join('')}
+          </div></div>
+        </div>`);
+    }
+    if (singles.length) {
+      sections.push(`<div class="b-section">
+          <h3 class="b-title">Platzierungsspiele</h3>
+          <div class="b-singles">${singles
+            .map((m) => `<div class="b-single"><h4>${esc(m.label)}</h4>${bracketCard(t, m, names, readOnly)}</div>`)
+            .join('')}</div>
+        </div>`);
+    }
+    return sections.join('');
   }
 
   function renderKO(t) {
     const s = t.settings;
     const names = teamMap(t);
+    const what = finalsName(t);
     if (t.stage === 'setup') {
       return `<section class="card"><p class="empty">${
-        s.format === 'ko' ? 'Der KO-Baum entsteht beim Start des Turniers im Spielplan.' : 'Der KO-Baum entsteht nach der Gruppenphase.'
+        s.format === 'ko' ? 'Der KO-Baum entsteht beim Start des Turniers im Spielplan.' : `Die ${esc(what)} entstehen nach der Gruppenphase.`.replace('Die KO-Phase entstehen', 'Die KO-Phase entsteht')
       }</p></section>`;
     }
     if (t.stage === 'groups') {
-      const entries = C.koEntries(t);
-      const tables = C.groupTables(t);
-      const rankOf = (id, g) => tables[g].findIndex((r) => r.id === id) + 1;
       const done = C.groupPhaseComplete(t);
+      let preview = [];
+      try {
+        preview = C.buildFinals(t).matches.filter((m) => m.homeSrc && m.homeSrc.team && m.awaySrc && m.awaySrc.team);
+      } catch (e) {
+        preview = [];
+      }
+      const tables = C.groupTables(t);
+      const origin = (id) => {
+        for (let g = 0; g < tables.length; g++) {
+          const i = tables[g].findIndex((r) => r.id === id);
+          if (i >= 0) return `${i + 1}. ${C.groupName(g)}`;
+        }
+        return '';
+      };
       return `<section class="card">
-          <h2>${done ? 'Qualifiziert für die KO-Phase' : 'Zwischenstand: aktuell qualifiziert'}</h2>
-          <ol class="seed-list">
-            ${entries
-              .map((e) => `<li><span>${esc(names.get(e.team))}</span><span class="muted">${rankOf(e.team, e.group)}. ${esc(C.groupName(e.group))}</span></li>`)
+          <h2>${done ? 'Erste Paarungen' : 'Zwischenstand: Paarungen nach aktuellem Stand'}</h2>
+          <ul class="pair-list">
+            ${preview
+              .map(
+                (m) => `<li><span class="muted pair-label">${esc(m.label)}</span>
+                  <span>${esc(names.get(m.homeSrc.team))} <small class="muted">(${esc(origin(m.homeSrc.team))})</small></span>
+                  <span class="muted">vs</span>
+                  <span>${esc(names.get(m.awaySrc.team))} <small class="muted">(${esc(origin(m.awaySrc.team))})</small></span></li>`
+              )
               .join('')}
-          </ol>
-          <p class="hint">Die Reihenfolge ist die Setzliste. Gruppensieger mit der besten Bilanz pro Spiel erhalten bei Bedarf ein Freilos.</p>
-          <button type="button" class="btn btn-primary" data-action="start-ko">${done ? 'KO-Phase starten' : 'KO-Phase vorzeitig starten'}</button>
+          </ul>
+          <p class="hint">${s.format === 'groups_ko' ? 'Gruppensieger mit der besten Bilanz pro Spiel erhalten bei Bedarf ein Freilos. Teams aus derselben Gruppe treffen in der ersten Runde nicht aufeinander.' : 'Die Gleichplatzierten aller Gruppen spielen um ihre Ränge.'}</p>
+          <button type="button" class="btn btn-primary" data-action="start-ko">${esc(what)} ${done ? 'starten' : 'vorzeitig starten'}</button>
         </section>`;
     }
     return `${rankingCard(t, names)}
-      <section class="card card-flush">
-        <div class="card-head"><h2>KO-Baum</h2></div>
+      <section class="card">
+        <h2>${esc(s.format === 'groups' ? 'Finalrunde' : 'KO-Baum')}</h2>
         ${bracket(t, names, false)}
       </section>`;
   }
@@ -970,6 +1126,22 @@
         </header>
         <div class="bm-grid">
           <aside class="bm-side">
+            ${
+              t.timer
+                ? `<section class="bm-panel bm-timer phase-${t.timer.phase}">
+                    <div class="bm-timer-phase" data-timer-phase>${esc(C.timerPhaseLabel(t, Date.now()))}</div>
+                    <div class="bm-timer-clock tabular" data-timer-clock>${C.formatClock(C.timerRemaining(t.timer, Date.now()))}</div>
+                    <div class="tb-progress"><span data-timer-bar></span></div>
+                    <div class="bm-timer-flash" data-timer-flash hidden></div>
+                    <ul class="bm-timer-matches">${C.slotMatches(t, t.timer.matchId)
+                      .map(
+                        (m) =>
+                          `<li><small>${esc(fieldLabel(t, m))}</small><span>${esc(sideName(t, m, 'h', names).text)} – ${esc(sideName(t, m, 'a', names).text)}</span></li>`
+                      )
+                      .join('')}</ul>
+                  </section>`
+                : ''
+            }
             <section class="bm-panel"><h2>Nächste Spiele</h2>${matchList(next)}</section>
             <section class="bm-panel"><h2>Letzte Resultate</h2>${matchList(recent)}</section>
           </aside>
@@ -987,6 +1159,629 @@
   }, 15000);
 
   /* ------------------------------------------------------------------ */
+  /* Spieluhr                                                            */
+  /* ------------------------------------------------------------------ */
+
+  const CLIENT_ID = C.uid('c');
+  let audioCtx = null;
+  let wakeLock = null;
+  let wakeLockTried = 0;
+  let flash = { text: '', until: 0 };
+  let prevTimer = null;
+  let prevTimerTid = null;
+
+  function ensureAudio() {
+    if (ui.sound === false) return;
+    try {
+      if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) audioCtx = new AC();
+      }
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    } catch (e) {
+      audioCtx = null;
+    }
+  }
+
+  // Tonfolgen: [Frequenz in Hz, Dauer in ms]
+  const SOUNDS = {
+    shift: [[880, 160]],
+    halftime: [[660, 350], [660, 350]],
+    end: [[523, 450], [523, 450], [392, 1000]],
+    next: [[880, 200], [1175, 450]],
+  };
+
+  function playSound(name) {
+    if (ui.sound === false || !audioCtx || audioCtx.state !== 'running') return;
+    let at = audioCtx.currentTime + 0.02;
+    for (const [freq, ms] of SOUNDS[name] || []) {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'square';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, at);
+      gain.gain.exponentialRampToValueAtTime(0.25, at + 0.02);
+      gain.gain.setValueAtTime(0.25, at + ms / 1000 - 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + ms / 1000);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(at);
+      osc.stop(at + ms / 1000 + 0.02);
+      at += ms / 1000 + 0.12;
+    }
+  }
+
+  function showFlash(text, ms) {
+    flash = { text, until: Date.now() + (ms || 4000) };
+  }
+
+  /** Erkennt Signale (Wechsel, Halbzeit, Spielende, nächstes Spiel) auf jedem Gerät. */
+  function detectSignals(t, now) {
+    const tm = t.timer;
+    const cur = tm
+      ? {
+          matchId: tm.matchId,
+          phase: tm.phase,
+          running: tm.running,
+          halftimeDone: tm.halftimeDone,
+          el: C.timerElapsed(tm, now),
+          dur: tm.durationMs,
+        }
+      : null;
+    const prev = prevTimerTid === t.id ? prevTimer : null;
+    prevTimer = cur;
+    prevTimerTid = t.id;
+    if (!prev || !cur) {
+      if (prev && !cur && prev.phase === 'break') {
+        playSound('next');
+        showFlash('Alle Spiele beendet');
+      }
+      return;
+    }
+    const s = t.settings;
+    if (prev.matchId !== cur.matchId) {
+      if (prev.phase === 'break') {
+        playSound('next');
+        showFlash('Nächstes Spiel bereitmachen');
+      }
+      return;
+    }
+    if (prev.phase === 'game' && cur.phase === 'break') {
+      playSound('end');
+      showFlash('Spielende · Wechselpause');
+      return;
+    }
+    if (cur.phase === 'game' && prev.running && !cur.running && cur.el >= cur.dur) {
+      playSound('end');
+      showFlash('Spielende');
+      return;
+    }
+    if (cur.phase === 'game' && !prev.halftimeDone && cur.halftimeDone) {
+      playSound('halftime');
+      showFlash('Halbzeit · Seitenwechsel', 6000);
+      return;
+    }
+    if (cur.phase === 'game' && cur.running && s.shiftInterval > 0) {
+      const step = s.shiftInterval * 60000;
+      const a = Math.floor(prev.el / step);
+      const b = Math.floor(cur.el / step);
+      if (b > a && b > 0 && cur.el < cur.dur - 2000) {
+        playSound('shift');
+        showFlash('Wechsel!', 2500);
+      }
+    }
+  }
+
+  function updateTimerDisplays(t, now) {
+    const tm = t.timer;
+    if (!tm) return;
+    const remaining = C.timerRemaining(tm, now);
+    const clock = C.formatClock(remaining);
+    const label = C.timerPhaseLabel(t, now);
+    const pct = tm.durationMs ? Math.min(100, (C.timerElapsed(tm, now) / tm.durationMs) * 100) : 0;
+    document.querySelectorAll('[data-timer-clock]').forEach((el) => {
+      if (el.textContent !== clock) el.textContent = clock;
+      el.classList.toggle('is-low', tm.phase === 'game' && tm.running && remaining <= 60000);
+    });
+    document.querySelectorAll('[data-timer-phase]').forEach((el) => {
+      if (el.textContent !== label) el.textContent = label;
+    });
+    document.querySelectorAll('[data-timer-bar]').forEach((el) => {
+      el.style.width = pct.toFixed(2) + '%';
+    });
+    const showing = flash.until > now;
+    document.querySelectorAll('[data-timer-flash]').forEach((el) => {
+      el.hidden = !showing;
+      if (showing && el.textContent !== flash.text) el.textContent = flash.text;
+    });
+  }
+
+  function manageWakeLock(t) {
+    const want = ui.beamer || !!(t.timer && t.timer.running);
+    if (want && !wakeLock && navigator.wakeLock && Date.now() - wakeLockTried > 30000 && document.visibilityState === 'visible') {
+      wakeLockTried = Date.now();
+      navigator.wakeLock
+        .request('screen')
+        .then((lock) => {
+          wakeLock = lock;
+          lock.addEventListener('release', () => {
+            wakeLock = null;
+          });
+        })
+        .catch(() => {});
+    } else if (!want && wakeLock) {
+      wakeLock.release().catch(() => {});
+      wakeLock = null;
+    }
+  }
+
+  function tick() {
+    const t = current();
+    const now = Date.now();
+    const tm = t.timer;
+    if (tm && tm.running && !isReadOnly(t)) {
+      const el = C.timerElapsed(tm, now);
+      const overdue =
+        el >= tm.durationMs + 3000 ||
+        (tm.phase === 'game' && t.settings.timerHalves === 2 && !tm.halftimeDone && el >= tm.durationMs / 2 + 3000);
+      const controller = !t.live || !tm.owner || tm.owner === CLIENT_ID || overdue;
+      if (controller) {
+        const events = C.timerTick(t, now);
+        if (events.length) {
+          if (t.timer) t.timer.owner = CLIENT_ID;
+          save();
+          pushLive(t);
+          remoteRender();
+        }
+      }
+    }
+    detectSignals(t, now);
+    updateTimerDisplays(t, now);
+    manageWakeLock(t);
+  }
+
+  function timerMatchInfo(t, names) {
+    const tm = t.timer;
+    const ms = C.slotMatches(t, tm.matchId);
+    const m = t.matches.find((x) => x.id === tm.matchId);
+    if (!m) return '';
+    const pair = (x) => `${esc(sideName(t, x, 'h', names).text)} – ${esc(sideName(t, x, 'a', names).text)}`;
+    const others = ms.filter((x) => x.id !== m.id);
+    return `<span class="tabular">${C.formatTime(m.start)}</span> · ${esc(fieldLabel(t, m))}: ${pair(m)}${
+      others.length ? ` <span class="muted">(+ ${others.length} ${others.length === 1 ? 'Spiel' : 'Spiele'} gleichzeitig)</span>` : ''
+    }`;
+  }
+
+  function renderTimerBar(t) {
+    const tm = t.timer;
+    if (!tm) return '';
+    const names = teamMap(t);
+    const now = Date.now();
+    const ro = isReadOnly(t);
+    const done = tm.phase === 'game' && !tm.running && C.timerElapsed(tm, now) >= tm.durationMs;
+    const startLabel = tm.running ? 'Pause' : C.timerElapsed(tm, now) > 0 ? 'Weiter' : 'Start';
+    const controls = ro
+      ? ''
+      : `${done ? '' : `<button type="button" class="btn ${tm.running ? '' : 'btn-primary'}" data-action="timer-toggle">${startLabel}</button>`}
+         <button type="button" class="btn btn-ghost btn-small" data-action="timer-minus" title="Eine Minute weniger">−1′</button>
+         <button type="button" class="btn btn-ghost btn-small" data-action="timer-plus" title="Eine Minute mehr">+1′</button>
+         <button type="button" class="btn btn-ghost btn-small" data-action="timer-reset">Zurück auf Start</button>
+         ${tm.phase === 'game' && t.settings.breakDuration > 0 ? '<button type="button" class="btn btn-ghost btn-small" data-action="timer-break">Wechselpause</button>' : ''}
+         <button type="button" class="btn btn-ghost btn-small" data-action="timer-next">Nächstes Spiel</button>
+         <button type="button" class="icon-btn" data-action="timer-close" aria-label="Spieluhr schliessen">✕</button>`;
+    return `<div class="timer-bar phase-${tm.phase}${tm.running ? ' is-running' : ''}" role="region" aria-label="Spieluhr">
+        <div class="tb-progress"><span data-timer-bar></span></div>
+        <div class="tb-inner">
+          <div class="tb-info">
+            <div class="tb-phase" data-timer-phase>${esc(C.timerPhaseLabel(t, now))}</div>
+            <div class="tb-match">${timerMatchInfo(t, names)}</div>
+          </div>
+          <div class="tb-clock tabular" data-timer-clock>${C.formatClock(C.timerRemaining(tm, now))}</div>
+          <div class="tb-flash" data-timer-flash hidden></div>
+          <div class="tb-controls">
+            ${controls}
+            <button type="button" class="btn btn-ghost btn-small" data-action="sound-toggle" aria-pressed="${ui.sound !== false}">${ui.sound !== false ? 'Ton an' : 'Ton aus'}</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Live-Modus (Synchronisation über die Datenbank der Online-Seite)    */
+  /* ------------------------------------------------------------------ */
+
+  const live = {
+    db: null,
+    checked: false,
+    list: [],
+    listError: '',
+    tid: null,
+    unsubs: [],
+    struct: null,
+    results: new Map(),
+    timerJson: null,
+    lastStruct: null,
+    lastResults: new Map(),
+    lastTimer: null,
+    readOnly: false,
+    connected: false,
+    error: '',
+    chains: new Map(),
+    inflight: 0,
+    applyPending: false,
+    loadTimer: null,
+  };
+  let pendingRender = false;
+
+  function isReadOnly(t) {
+    return !!(t && t.live && live.readOnly);
+  }
+
+  /** Neu zeichnen, ausser jemand tippt gerade (dann beim Verlassen des Feldes). */
+  function remoteRender() {
+    const a = document.activeElement;
+    const editing =
+      a && app.contains(a) && /^(INPUT|TEXTAREA)$/.test(a.tagName) && a.type !== 'checkbox' && a.value !== a.defaultValue;
+    if (editing && !ui.beamer) {
+      pendingRender = true;
+      return;
+    }
+    queueRender();
+  }
+
+  document.addEventListener('focusout', () => {
+    if (!pendingRender) return;
+    pendingRender = false;
+    setTimeout(render, 0);
+  });
+
+  async function initLive() {
+    if (!window.claude || typeof window.claude.use !== 'function') {
+      live.checked = true;
+      return;
+    }
+    let db = null;
+    try {
+      db = await window.claude.use('db');
+    } catch (e) {
+      db = null;
+    }
+    live.checked = true;
+    if (!db) return remoteRender();
+    live.db = db;
+    try {
+      db.collection('live')
+        .limit(200)
+        .onSnapshot(
+          (snap) => {
+            live.list = snap.docs
+              .filter((d) => d.exists)
+              .map((d) => {
+                const x = d.data() || {};
+                return { id: d.id, name: String(x.name || 'Turnier').slice(0, 80), updated: Number(x.updated) || 0 };
+              });
+            live.listError = '';
+            remoteRender();
+          },
+          (err) => {
+            live.listError = err && err.code;
+            remoteRender();
+          }
+        );
+    } catch (e) {
+      live.listError = 'unavailable';
+    }
+    attachLive();
+    remoteRender();
+  }
+
+  function detachLive() {
+    live.unsubs.forEach((u) => {
+      try {
+        u();
+      } catch (e) {
+        /* egal */
+      }
+    });
+    live.unsubs = [];
+    clearTimeout(live.loadTimer);
+    Object.assign(live, {
+      tid: null,
+      struct: null,
+      results: new Map(),
+      timerJson: null,
+      lastStruct: null,
+      lastResults: new Map(),
+      lastTimer: null,
+      readOnly: false,
+      connected: false,
+      error: '',
+      seen: false,
+    });
+  }
+
+  function attachLive() {
+    if (!live.db) return;
+    const t = current();
+    const want = t.live ? t.id : null;
+    if (want === live.tid) return;
+    detachLive();
+    if (!want) return;
+    live.tid = want;
+    const base = 'live/' + want;
+    const onError = (err) => {
+      live.error = (err && err.code) || 'unavailable';
+      remoteRender();
+    };
+    live.loadTimer = setTimeout(() => {
+      if (!live.connected) {
+        live.error = 'timeout';
+        remoteRender();
+      }
+    }, 10000);
+    live.unsubs.push(
+      live.db.doc(base).onSnapshot((snap) => {
+        if (live.tid !== want) return;
+        if (!snap.exists) {
+          // Nur als beendet werten, wenn das Turnier schon einmal auf dem Server war
+          if (live.seen && !snap.metadata.fromCache && !snap.metadata.hasPendingWrites) endedRemotely(want);
+          return;
+        }
+        live.seen = true;
+        if (!snap.metadata.fromCache) {
+          live.connected = true;
+          live.error = '';
+          clearTimeout(live.loadTimer);
+        }
+        const d = snap.data() || {};
+        if (typeof d.json === 'string') live.struct = d.json;
+        applyRemote();
+      }, onError)
+    );
+    live.unsubs.push(
+      live.db
+        .collection(base + '/results')
+        .limit(1000)
+        .onSnapshot((snap) => {
+          if (live.tid !== want) return;
+          const map = new Map();
+          snap.docs.forEach((d) => {
+            if (d.exists) map.set(d.id, d.data());
+          });
+          live.results = map;
+          applyRemote();
+        }, onError)
+    );
+    live.unsubs.push(
+      live.db.doc(base + '/meta/timer').onSnapshot((snap) => {
+        if (live.tid !== want) return;
+        const d = snap.exists ? snap.data() || {} : {};
+        live.timerJson = typeof d.json === 'string' ? d.json : null;
+        applyRemote();
+      }, onError)
+    );
+  }
+
+  function endedRemotely(tid) {
+    const t = store.tournaments[tid];
+    if (!t) return;
+    if (!t.teams.length && !t.matches.length) {
+      delete store.tournaments[tid];
+      if (store.activeId === tid) store.activeId = null;
+    } else {
+      t.live = false;
+    }
+    save();
+    toast('Die Live-Übertragung dieses Turniers wurde beendet. Deine Kopie bleibt hier gespeichert.');
+    detachLive();
+    remoteRender();
+  }
+
+  function structOf(t) {
+    const c = C.clone(t);
+    delete c.timer;
+    delete c.live;
+    for (const m of c.matches) {
+      m.scoreH = null;
+      m.scoreA = null;
+      m.winner = null;
+      m.resultFor = null;
+      if (m.phase === 'ko') {
+        m.home = null;
+        m.away = null;
+      }
+    }
+    return JSON.stringify(c);
+  }
+
+  function resultJson(r) {
+    return JSON.stringify({ h: r.h, a: r.a, w: r.w || null });
+  }
+
+  function resultsOf(t) {
+    const map = new Map();
+    for (const m of t.matches) {
+      if (C.isPlayed(m)) map.set(m.id, resultJson({ h: m.scoreH, a: m.scoreA, w: m.winner }));
+    }
+    return map;
+  }
+
+  function timerOf(t) {
+    return t.timer ? JSON.stringify(t.timer) : null;
+  }
+
+  /** Server-Stand (Struktur + Resultate + Uhr) in das lokale Turnier übernehmen. */
+  function applyRemote() {
+    const tid = live.tid;
+    if (!tid || live.struct === null) return;
+    if (live.inflight > 0) {
+      live.applyPending = true;
+      return;
+    }
+    let t;
+    try {
+      t = C.normalizeTournament(JSON.parse(live.struct));
+    } catch (e) {
+      return;
+    }
+    t.id = tid;
+    t.live = true;
+    const results = live.results;
+    const valid = (r) => r && Number.isInteger(r.h) && Number.isInteger(r.a) && r.h >= 0 && r.a >= 0;
+    for (const m of t.matches) {
+      const r = results.get(m.id);
+      if (m.phase === 'group' && valid(r)) {
+        m.scoreH = r.h;
+        m.scoreA = r.a;
+      }
+    }
+    const ko = t.matches.filter((m) => m.phase === 'ko').sort((a, b) => a.order - b.order);
+    for (const m of ko) {
+      const r = results.get(m.id);
+      if (!valid(r)) continue;
+      C.resolveKO(t);
+      if (!m.home || !m.away) continue;
+      m.scoreH = r.h;
+      m.scoreA = r.a;
+      m.winner = r.w === m.home || r.w === m.away ? r.w : null;
+      m.resultFor = [m.home, m.away];
+    }
+    C.resolveKO(t);
+    try {
+      t.timer = live.timerJson ? JSON.parse(live.timerJson) : null;
+      if (t.timer && !t.matches.some((m) => m.id === t.timer.matchId)) t.timer = null;
+    } catch (e) {
+      t.timer = null;
+    }
+    const local = store.tournaments[tid];
+    if (local) t.created = local.created;
+    store.tournaments[tid] = t;
+    live.lastStruct = structOf(t);
+    const raw = new Map();
+    for (const [id, r] of results) if (valid(r)) raw.set(id, resultJson(r));
+    live.lastResults = raw;
+    live.lastTimer = live.timerJson;
+    save();
+    remoteRender();
+  }
+
+  function liveWrite(path, op) {
+    const prev = live.chains.get(path) || Promise.resolve();
+    live.inflight++;
+    const run = () => op(live.db.doc(path));
+    const next = prev
+      .then(run)
+      .catch(
+        (err) =>
+          err && err.code === 'unavailable'
+            ? new Promise((r) => setTimeout(r, 500 + Math.random() * 1000)).then(run)
+            : Promise.reject(err)
+      )
+      .catch(handleLiveError)
+      .then(() => {
+        live.inflight--;
+        if (live.inflight === 0 && live.applyPending) {
+          live.applyPending = false;
+          applyRemote();
+        }
+      });
+    live.chains.set(path, next);
+  }
+
+  function handleLiveError(err) {
+    const code = (err && err.code) || 'unavailable';
+    if (code === 'invalid_argument') {
+      if (!live.readOnly) {
+        live.readOnly = true;
+        toast('Dieses Live-Turnier kannst du nur ansehen. Zum Eintragen braucht es mindestens die Rolle «Mitwirkende».', 'error');
+        live.applyPending = true;
+        remoteRender();
+      }
+    } else if (code === 'quota_exceeded') {
+      toast('Der Speicher für Live-Turniere ist voll. Beende alte Live-Turniere.', 'error');
+    } else {
+      toast('Live-Synchronisation gestört. Änderungen bleiben auf diesem Gerät.', 'error');
+    }
+  }
+
+  /** Lokale Änderungen an den Server übertragen (nur was sich geändert hat). */
+  function pushLive(t) {
+    if (!live.db || !t.live || live.tid !== t.id || live.readOnly) return;
+    const base = 'live/' + t.id;
+    const struct = structOf(t);
+    if (struct !== live.lastStruct) {
+      live.lastStruct = struct;
+      liveWrite(base, (ref) => ref.set({ name: t.name, updated: Date.now(), json: struct }));
+    }
+    const cur = resultsOf(t);
+    for (const [id, json] of cur) {
+      if (live.lastResults.get(id) !== json) {
+        const body = JSON.parse(json);
+        liveWrite(base + '/results/' + id, (ref) => ref.set(body));
+      }
+    }
+    for (const id of live.lastResults.keys()) {
+      if (!cur.has(id)) liveWrite(base + '/results/' + id, (ref) => ref.delete());
+    }
+    live.lastResults = cur;
+    const tj = timerOf(t);
+    if (tj !== live.lastTimer) {
+      live.lastTimer = tj;
+      liveWrite(base + '/meta/timer', (ref) => ref.set({ json: tj }));
+    }
+  }
+
+  function goLive(t) {
+    if (!live.db) return;
+    t.live = true;
+    save();
+    attachLive();
+    live.lastStruct = null;
+    live.lastResults = new Map();
+    live.lastTimer = '__none__';
+    pushLive(t);
+    render();
+    toast('Das Turnier ist jetzt live. Teile die Seite, damit andere mitmachen können.', 'ok');
+  }
+
+  function stopLive(t) {
+    if (!live.db || !t.live) return;
+    const base = 'live/' + t.id;
+    if (!live.readOnly) {
+      for (const id of new Set([...live.lastResults.keys(), ...live.results.keys()])) {
+        liveWrite(base + '/results/' + id, (ref) => ref.delete());
+      }
+      liveWrite(base + '/meta/timer', (ref) => ref.delete());
+      liveWrite(base, (ref) => ref.delete());
+    }
+    t.live = false;
+    save();
+    detachLive();
+    render();
+  }
+
+  function joinLive(id) {
+    let t = store.tournaments[id];
+    if (!t) {
+      const entry = live.list.find((x) => x.id === id);
+      t = C.normalizeTournament({ id, name: entry ? entry.name : 'Live-Turnier', live: true });
+      store.tournaments[id] = t;
+    }
+    t.live = true;
+    store.activeId = id;
+    save();
+    render();
+  }
+
+  function liveStatus(t) {
+    if (!t.live) return '';
+    let text = 'verbinde …';
+    if (live.readOnly) text = 'nur Ansicht';
+    else if (live.connected) text = 'synchronisiert';
+    else if (live.error) text = 'keine Verbindung, Änderungen bleiben auf diesem Gerät';
+    return `<span class="pill pill-live">Live</span><span class="meta-text">${esc(text)}</span>`;
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Export / Import                                                     */
   /* ------------------------------------------------------------------ */
 
@@ -1001,10 +1796,20 @@
     );
   }
 
+  let downloadsApi = null;
+  if (window.claude && typeof window.claude.use === 'function') {
+    window.claude
+      .use('downloads')
+      .then((d) => {
+        downloadsApi = d;
+      })
+      .catch(() => {});
+  }
+
   function exportDialog(t) {
     const json = JSON.stringify(t, null, 2);
     const actions = [{ label: 'In Zwischenablage kopieren', value: 'copy', cmd: 'copy' }];
-    if (!EMBEDDED) actions.push({ label: 'Als Datei speichern', value: 'file', cmd: 'file' });
+    if (!EMBEDDED || downloadsApi) actions.push({ label: 'Als Datei speichern', value: 'file', cmd: 'file' });
     actions.push({ label: 'Schliessen', value: 'null', kind: 'primary' });
     openModal({
       title: 'Turnier exportieren',
@@ -1023,7 +1828,16 @@
           if (navigator.clipboard && navigator.clipboard.writeText) {
             navigator.clipboard.writeText(json).then(() => toast('In die Zwischenablage kopiert.', 'ok'), fallback);
           } else fallback();
-        } else if (cmd === 'file') {
+        } else if (cmd === 'file' && downloadsApi) {
+          downloadsApi
+            .save({ filename: slug(t.name) + '.json', data: json })
+            .then(() => toast('Datei gespeichert.', 'ok'))
+            .catch((err) => {
+              if (err && err.code === 'declined') return;
+              if (err && err.code === 'rate_limited') toast('Es ist schon ein Speicherdialog offen.');
+              else toast('Speichern als Datei ist hier nicht möglich. Nutze «In Zwischenablage kopieren».', 'error');
+            });
+        } else if (cmd === 'file' && !EMBEDDED) {
           const blob = new Blob([json], { type: 'application/json' });
           const a = document.createElement('a');
           a.href = URL.createObjectURL(blob);
@@ -1062,6 +1876,7 @@
             t.name += ' (Import)';
           }
           t.created = Date.now();
+          t.live = false;
           store.tournaments[t.id] = t;
           last = t;
         }
@@ -1117,6 +1932,7 @@
   }
 
   async function onClick(e) {
+    ensureAudio();
     const tabBtn = e.target.closest('[data-tab]');
     if (tabBtn) {
       ui.tab = tabBtn.dataset.tab;
@@ -1156,6 +1972,7 @@
       }
       case 'delete': {
         if (!(await confirmDialog('Turnier löschen?', `«${t.name}» wird mit allen Resultaten gelöscht.`, 'Löschen', true))) return;
+        if (t.live) stopLive(t);
         delete store.tournaments[t.id];
         store.activeId = null;
         save();
@@ -1169,6 +1986,7 @@
       case 'beamer':
         ui.beamer = true;
         render();
+        window.scrollTo(0, 0);
         try {
           if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen();
         } catch (err) {
@@ -1199,7 +2017,7 @@
         return;
       case 'start-ko': {
         const force = !C.groupPhaseComplete(t);
-        if (force && !(await confirmDialog('KO-Phase vorzeitig starten?', 'Es sind noch nicht alle Gruppenspiele gespielt. Die Qualifikation richtet sich nach dem aktuellen Stand, offene Gruppenspiele werden gesperrt.', 'Trotzdem starten'))) return;
+        if (force && !(await confirmDialog(finalsName(t) + ' vorzeitig starten?', 'Es sind noch nicht alle Gruppenspiele gespielt. Die Paarungen richten sich nach dem aktuellen Stand, offene Gruppenspiele werden gesperrt.', 'Trotzdem starten'))) return;
         if (mutate((x) => C.startKO(x, { force }))) {
           ui.tab = 'ko';
           saveUi();
@@ -1208,12 +2026,82 @@
         return;
       }
       case 'reset-ko':
-        if (!(await confirmDialog('KO-Phase zurücksetzen?', 'Alle KO-Spiele und deren Resultate werden gelöscht. Die Gruppenresultate bleiben erhalten.', 'Zurücksetzen', true))) return;
+        if (!(await confirmDialog(finalsName(t) + ' zurücksetzen?', 'Alle Spiele nach der Gruppenphase und deren Resultate werden gelöscht. Die Gruppenresultate bleiben erhalten.', 'Zurücksetzen', true))) return;
         mutate((x) => C.resetKO(x));
         return;
       case 'reset':
         if (!(await confirmDialog('Turnier zurücksetzen?', 'Der Spielplan und alle Resultate werden gelöscht. Teams und Einstellungen bleiben erhalten.', 'Zurücksetzen', true))) return;
         mutate((x) => C.resetTournament(x));
+        return;
+      case 'timer-select':
+        mutate((x) => {
+          if (x.timer && x.timer.matchId === id) return;
+          if (x.timer) C.timerPause(x.timer, Date.now());
+          x.timer = C.createTimer(x, id, CLIENT_ID);
+        });
+        return;
+      case 'timer-toggle':
+        mutate((x) => {
+          if (!x.timer) return;
+          if (x.timer.running) C.timerPause(x.timer, Date.now());
+          else C.timerStart(x.timer, Date.now(), CLIENT_ID);
+        });
+        return;
+      case 'timer-plus':
+      case 'timer-minus':
+        mutate((x) => x.timer && C.timerAdjust(x.timer, Date.now(), btn.dataset.action === 'timer-plus' ? 60000 : -60000));
+        return;
+      case 'timer-reset':
+        mutate((x) => {
+          if (x.timer) x.timer = C.createTimer(x, x.timer.matchId, CLIENT_ID);
+        });
+        return;
+      case 'timer-break':
+        mutate((x) => {
+          if (!x.timer) return;
+          C.timerBreak(x, Date.now());
+          x.timer.owner = CLIENT_ID;
+        });
+        return;
+      case 'timer-next':
+        mutate((x) => C.timerNext(x, CLIENT_ID));
+        if (!current().timer) toast('Es gibt kein weiteres Spiel.');
+        return;
+      case 'timer-close':
+        mutate((x) => {
+          x.timer = null;
+        });
+        return;
+      case 'sound-toggle':
+        ui.sound = ui.sound === false;
+        saveUi();
+        ensureAudio();
+        if (ui.sound) playSound('shift');
+        render();
+        return;
+      case 'draw-lot':
+      case 'clear-lot': {
+        const ids = (btn.dataset.ids || '').split(',').filter(Boolean);
+        mutate((x) => {
+          if (x.stage !== 'groups') throw new Error('Die Gruppenphase ist abgeschlossen.');
+          if (btn.dataset.action === 'draw-lot') C.drawLots(x, ids);
+          else C.clearLots(x, ids);
+        });
+        if (btn.dataset.action === 'draw-lot') toast('Los gezogen.', 'ok');
+        return;
+      }
+      case 'clear-lunch':
+        mutate((x) => {
+          x.settings.lunchStart = '';
+          if (x.stage !== 'setup') C.scheduleAll(x);
+        });
+        return;
+      case 'live-start':
+        goLive(t);
+        return;
+      case 'live-stop':
+        if (!(await confirmDialog('Live-Übertragung beenden?', 'Das Turnier wird von allen anderen Geräten entfernt. Auf diesem Gerät bleibt es gespeichert.', 'Beenden', true))) return;
+        stopLive(t);
         return;
       case 'draw-groups':
         mutate((x) => C.drawGroups(x));
@@ -1269,6 +2157,7 @@
     if (el.closest('#modal-root')) return;
 
     if (el.dataset.change === 'switch') {
+      if (el.value.startsWith('live:')) return joinLive(el.value.slice(5));
       store.activeId = el.value;
       save();
       render();
@@ -1412,4 +2301,9 @@
   });
 
   render();
+  setInterval(tick, 200);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') wakeLockTried = 0;
+  });
+  initLive();
 })();

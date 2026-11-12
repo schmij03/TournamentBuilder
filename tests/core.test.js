@@ -104,7 +104,9 @@ test('KO mit 6 Teams: 2 Freilose, Final und Spiel um Platz 3', () => {
   const ranking = C.finalRanking(t);
   assert.ok(ranking);
   assert.equal(ranking[0].place, 1);
-  assert.equal(ranking.length, 4);
+  // Plätze 1–4 ausgespielt, die beiden Viertelfinal-Verlierer teilen Platz 5
+  assert.deepEqual(ranking.map((r) => r.place), [1, 2, 3, 4, 5]);
+  assert.equal(ranking[4].teams.length, 2);
   assert.ok(C.isFinished(t));
 });
 
@@ -187,6 +189,98 @@ test('Liga (1 Gruppe): Schlussrangliste nach allen Spielen', () => {
   for (const m of t.matches) C.setResult(t, m.id, 1, 0);
   assert.ok(C.isFinished(t));
   assert.equal(C.finalRanking(t).length, 5);
+});
+
+function playAll(t, rng) {
+  for (let guard = 0; guard < 500; guard++) {
+    const open = t.matches.find((m) => m.home && m.away && !C.isPlayed(m));
+    if (!open) return;
+    const h = rng ? Math.floor(rng() * 4) : 2;
+    let a = rng ? Math.floor(rng() * 4) : 1;
+    if (open.phase === 'ko' && a === h) a = h + 1;
+    C.setResult(t, open.id, h, a);
+  }
+}
+
+function placesOf(t) {
+  return C.finalRanking(t).flatMap((r) => r.teams.map(() => r.place));
+}
+
+test('Alle Plätze ausspielen: KO mit 8 und 6 Teams', () => {
+  const t8 = makeTournament(8, { format: 'ko', placements: true });
+  C.startTournament(t8);
+  assert.equal(t8.matches.length, 12);
+  playAll(t8);
+  assert.deepEqual(placesOf(t8), [1, 2, 3, 4, 5, 6, 7, 8]);
+  const t6 = makeTournament(6, { format: 'ko', placements: true });
+  C.startTournament(t6);
+  playAll(t6);
+  assert.deepEqual(placesOf(t6), [1, 2, 3, 4, 5, 6]);
+  assert.ok(C.isFinished(t6));
+});
+
+test('Alle Plätze ausspielen: Gruppen + KO inkl. Nichtqualifizierte', () => {
+  const t = makeTournament(10, { format: 'groups_ko', groupCount: 2, advancePerGroup: 2, placements: true });
+  C.drawGroups(t, mulberry(5));
+  C.startTournament(t);
+  playAll(t, mulberry(9));
+  C.startFinals(t);
+  playAll(t, mulberry(10));
+  assert.deepEqual(placesOf(t), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  assert.equal(new Set(C.finalRanking(t).flatMap((r) => r.teams)).size, 10);
+});
+
+test('Platzierungsspiele nach Gruppenphase (2 Gruppen à 4)', () => {
+  const t = makeTournament(8, { format: 'groups', groupCount: 2, placements: true });
+  C.drawGroups(t, mulberry(2));
+  C.startTournament(t);
+  playAll(t, mulberry(4));
+  C.startFinals(t);
+  const ko = t.matches.filter((m) => m.phase === 'ko');
+  assert.equal(ko.length, 4);
+  assert.deepEqual(ko.map((m) => m.label).sort(), ['Final', 'Spiel um Platz 3', 'Spiel um Platz 5', 'Spiel um Platz 7']);
+  // Final kommt zuletzt
+  assert.equal(ko.sort((a, b) => a.order - b.order)[3].label, 'Final');
+  playAll(t);
+  assert.deepEqual(placesOf(t), [1, 2, 3, 4, 5, 6, 7, 8]);
+});
+
+test('Mittagspause verschiebt spätere Spiele', () => {
+  const t = makeTournament(6, { groupCount: 1, fields: 1, startTime: '11:00', matchDuration: 10, breakDuration: 5, lunchStart: '12:00', lunchDuration: 30 });
+  C.startTournament(t);
+  const starts = [...new Set(t.matches.map((m) => m.start))].sort((a, b) => a - b).map(C.formatTime);
+  // 11:00, 11:15, 11:30, 11:45 (endet 11:55), 12:00 würde in die Pause fallen → 12:30
+  assert.deepEqual(starts.slice(0, 6), ['11:00', '11:15', '11:30', '11:45', '12:30', '12:45']);
+});
+
+test('Losentscheid löst Gleichstand auf', () => {
+  const t = makeTournament(2, { groupCount: 1 });
+  C.startTournament(t);
+  C.setResult(t, t.matches[0].id, 1, 1);
+  let table = C.groupTables(t)[0];
+  assert.ok(table[0].tied);
+  C.drawLots(t, ['T0', 'T1'], mulberry(1));
+  table = C.groupTables(t)[0];
+  assert.ok(!table[0].tied && table[0].byLot);
+  assert.deepEqual(table.map((r) => r.rank), [1, 2]);
+});
+
+test('Spieluhr: Halbzeit, Spielende, Wechselpause, nächstes Spiel', () => {
+  const t = makeTournament(4, { groupCount: 1, fields: 1, matchDuration: 10, breakDuration: 2, timerHalves: 2 });
+  C.startTournament(t);
+  const first = t.matches.slice().sort((a, b) => a.start - b.start)[0];
+  t.timer = C.createTimer(t, first.id, 'me');
+  C.timerStart(t.timer, 0);
+  assert.deepEqual(C.timerTick(t, 4 * 60000), []);
+  assert.deepEqual(C.timerTick(t, 5 * 60000 + 300), ['halftime']);
+  assert.equal(C.timerPhaseLabel(t, 5 * 60000 + 400), 'Halbzeit · Seitenwechsel');
+  C.timerStart(t.timer, 6 * 60000);
+  assert.equal(C.formatClock(C.timerRemaining(t.timer, 7 * 60000)), '04:00');
+  assert.deepEqual(C.timerTick(t, 11 * 60000), ['end']);
+  assert.equal(t.timer.phase, 'break');
+  assert.deepEqual(C.timerTick(t, 13 * 60000 + 10), ['break-end']);
+  assert.notEqual(t.timer.matchId, first.id);
+  assert.equal(t.timer.running, false);
 });
 
 function mulberry(seed) {
