@@ -1,0 +1,14 @@
+{
+  "name": "TournamentBuilder",
+  "short_name": "Turniere",
+  "description": "Turniere für die Schule planen: Gruppenphase, KO-Phase, Spieluhr und Beamer-Ansicht.",
+  "lang": "de",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#eef2f5",
+  "theme_color": "#1d5a85",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
