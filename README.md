@@ -16,7 +16,11 @@ Turniere für die Schule planen und durchführen: Sporttag, Unihockey-Turnier, T
 - **Resultate:** direkt im Spielplan oder im KO-Baum eingeben; Remis im KO mit Sieger nach Penalty
 - **Spieluhr:** bei jedem Spiel mit «Uhr» wählbar; zählt die Spielzeit herunter, optional mit Halbzeit und Seitenwechsel, Wechselsignal alle X Minuten (z. B. Linienwechsel), danach Wechselpause und Sprung zum nächsten Spiel; mit Signaltönen
 - **Live-Modus** (nur in der Online-Version auf claude.ai): Turnier mit «Live teilen» auf mehrere Geräte bringen, z. B. Schiedsrichter tragen Resultate am Handy ein und der Beamer zeigt sie sofort, inklusive laufender Spieluhr
+- **Schiri-Ansicht:** fürs Handy, pro Feld: aktuelles Spiel mit grossen +/−-Knöpfen für den Spielstand, Spieluhr und die nächsten Spiele auf diesem Feld
+- **Rückgängig:** letzte Änderungen zurücknehmen (Knopf oder Strg+Z)
+- **Offline-App:** Die GitHub-Pages-Version lässt sich auf dem Handy oder Laptop installieren und läuft danach auch ohne Internet
 - **Beamer-Ansicht:** Vollbild mit Uhrzeit, Spieluhr, nächsten Spielen, letzten Resultaten, Tabellen bzw. KO-Baum
+- Spielplan nach Gruppe, Team und Feld filtern
 - **Mehrere Turniere**, Kopie als Vorlage, Export und Import als JSON, Drucken des Spielplans
 - Bezeichnungen anpassbar (Tore/Punkte/Körbe, Feld/Platz/Tisch), helles und dunkles Farbschema
 

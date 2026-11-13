@@ -23,7 +23,11 @@
 
   let storageOk = true;
   let store = loadStore();
-  let ui = Object.assign({ tab: 'teams', filter: 'all', team: 'all', openOnly: false, sound: true }, loadUi());
+  let ui = Object.assign(
+    { tab: 'teams', filter: 'all', team: 'all', field: 'all', openOnly: false, sound: true, refField: 1, refDrafts: {} },
+    loadUi()
+  );
+  if (!ui.refDrafts || typeof ui.refDrafts !== 'object') ui.refDrafts = {};
   ui.beamer = BEAMER_WINDOW;
   let renderQueued = false;
 
@@ -75,8 +79,8 @@
 
   function saveUi() {
     try {
-      const { tab, filter, team, openOnly, sound } = ui;
-      localStorage.setItem(UI_KEY, JSON.stringify({ tab, filter, team, openOnly, sound }));
+      const { tab, filter, team, field, openOnly, sound, refField, refDrafts } = ui;
+      localStorage.setItem(UI_KEY, JSON.stringify({ tab, filter, team, field, openOnly, sound, refField, refDrafts }));
     } catch (e) {
       /* egal */
     }
@@ -115,6 +119,7 @@
       queueRender();
       return false;
     }
+    const before = opts && opts.undo === false ? null : JSON.stringify(t);
     try {
       fn(t);
     } catch (e) {
@@ -123,11 +128,48 @@
       return false;
     }
     C.resolveKO(t);
+    if (before !== null && before !== JSON.stringify(t)) {
+      undoStack.push({ tid: t.id, json: before, label: (opts && opts.label) || 'Änderung' });
+      if (undoStack.length > 40) undoStack.shift();
+    }
     save();
     pushLive(t);
     if (opts && opts.defer) queueRender();
     else render();
     return true;
+  }
+
+  /* Rückgängig: Zustände vor den letzten Änderungen (nur in dieser Sitzung) */
+  const undoStack = [];
+  const NO_UNDO = { undo: false };
+
+  function canUndo(t) {
+    return undoStack.some((u) => u.tid === t.id) && !isReadOnly(t);
+  }
+
+  function undo() {
+    const t = current();
+    if (isReadOnly(t)) return;
+    let i = undoStack.length - 1;
+    while (i >= 0 && undoStack[i].tid !== t.id) i--;
+    if (i < 0) return toast('Es gibt nichts rückgängig zu machen.');
+    const [entry] = undoStack.splice(i, 1);
+    let restored;
+    try {
+      restored = C.normalizeTournament(JSON.parse(entry.json));
+    } catch (e) {
+      return toast('Rückgängig ist fehlgeschlagen.', 'error');
+    }
+    // Spieluhr und Live-Status laufen weiter wie bisher
+    restored.timer = t.timer && restored.matches.some((m) => m.id === t.timer.matchId) ? t.timer : null;
+    restored.live = t.live;
+    restored.created = t.created;
+    store.tournaments[t.id] = restored;
+    C.resolveKO(restored);
+    save();
+    pushLive(restored);
+    render();
+    toast('Rückgängig gemacht: ' + entry.label);
   }
 
   function queueRender() {
@@ -304,6 +346,7 @@
     ];
     if (C.usesGroups(s)) tabs.push(['tables', 'Tabellen']);
     if (C.usesKO(s)) tabs.push(['ko', s.format === 'groups' ? 'Finalrunde' : 'KO-Phase']);
+    if (t.stage !== 'setup') tabs.push(['referee', 'Schiri']);
     return tabs;
   }
 
@@ -321,7 +364,7 @@
 
     document.title = t.name + ' · TournamentBuilder';
     document.body.classList.toggle('is-beamer', !!ui.beamer);
-    document.body.classList.toggle('has-timer', !!t.timer && !ui.beamer);
+    document.body.classList.toggle('has-timer', !!t.timer && !ui.beamer && ui.tab !== 'referee');
     app.innerHTML = ui.beamer ? renderBeamer(t) : renderMain(t);
     attachLive();
     updateTimerDisplays(t, Date.now());
@@ -353,6 +396,7 @@
       schedule: renderSchedule,
       tables: renderTables,
       ko: renderKO,
+      referee: renderReferee,
     }[ui.tab](t);
 
     return `
@@ -373,6 +417,7 @@
             </select>
           </div>
           <div class="top-actions">
+            <button type="button" class="btn btn-ghost" data-action="undo" title="Letzte Änderung rückgängig machen (Strg+Z)"${canUndo(t) ? '' : ' disabled'}>Rückgängig</button>
             <button type="button" class="btn btn-ghost" data-action="new">Neu</button>
             <button type="button" class="btn btn-ghost" data-action="duplicate" title="Teams und Einstellungen übernehmen, ohne Resultate">Kopie</button>
             <button type="button" class="btn btn-ghost" data-action="export">Export</button>
@@ -423,7 +468,7 @@
             : 'Alle Daten bleiben in diesem Browser gespeichert. Für einen anderen Computer: Export und Import' + (live.db ? ' oder «Live teilen».' : '.')
         }</footer>
       </div>
-      ${renderTimerBar(t)}`;
+      ${ui.tab === 'referee' ? '' : renderTimerBar(t)}`;
   }
 
   /* ------------------------------------------------------------------ */
@@ -731,6 +776,7 @@
         if (ui.filter === 'ko' && m.phase !== 'ko') return false;
         if (ui.filter.startsWith('g') && !(m.phase === 'group' && m.group === +ui.filter.slice(1))) return false;
         if (ui.team !== 'all' && m.home !== ui.team && m.away !== ui.team) return false;
+        if (ui.field !== 'all' && m.field !== +ui.field) return false;
         if (ui.openOnly && C.isPlayed(m)) return false;
         return true;
       })
@@ -798,6 +844,7 @@
     if (t.matches.some((m) => m.phase === 'ko')) filterOpts.push(['ko', finalsName(t)]);
     if (!filterOpts.some(([k]) => k === ui.filter)) ui.filter = 'all';
     if (ui.team !== 'all' && !names.has(ui.team)) ui.team = 'all';
+    if (ui.field !== 'all' && +ui.field > s.fields) ui.field = 'all';
 
     const matches = filteredMatches(t);
     const slots = [];
@@ -848,6 +895,15 @@
               <option value="all">Alle Teams</option>
               ${t.teams.map((x) => `<option value="${esc(x.id)}"${ui.team === x.id ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}
             </select>
+            ${
+              s.fields > 1
+                ? `<label class="sr-only" for="flt-field">${esc(s.fieldName)} filtern</label>
+                   <select id="flt-field" class="input input-compact" data-ui="field">
+                     <option value="all">Alle ${esc(s.fieldName)}er</option>
+                     ${Array.from({ length: s.fields }, (_, i) => `<option value="${i + 1}"${String(ui.field) === String(i + 1) ? ' selected' : ''}>${esc(s.fieldName)} ${i + 1}</option>`).join('')}
+                   </select>`
+                : ''
+            }
             <span class="check"><input id="flt-open" type="checkbox" data-ui="openOnly"${ui.openOnly ? ' checked' : ''}><label for="flt-open">Nur offene</label></span>
           </div>
           <div class="toolbar-actions">
@@ -1075,6 +1131,94 @@
         <h2>${esc(s.format === 'groups' ? 'Finalrunde' : 'KO-Baum')}</h2>
         ${bracket(t, names, false)}
       </section>`;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Schiri-Ansicht: ein Feld, grosse Knöpfe, fürs Handy                 */
+  /* ------------------------------------------------------------------ */
+
+  function refereeMatch(t, field) {
+    const list = t.matches.filter((m) => m.field === field).sort((a, b) => a.start - b.start);
+    if (t.timer) {
+      const timed = C.slotMatches(t, t.timer.matchId).find((m) => m.field === field);
+      if (timed && !C.isPlayed(timed) && timed.home && timed.away) return { current: timed, list };
+    }
+    return { current: list.find((m) => !C.isPlayed(m) && m.home && m.away) || null, list };
+  }
+
+  function renderReferee(t) {
+    const s = t.settings;
+    const names = teamMap(t);
+    const field = Math.min(Math.max(1, parseInt(ui.refField, 10) || 1), s.fields);
+    const { current: m, list } = refereeMatch(t, field);
+    const ro = isReadOnly(t);
+    const fieldSelect =
+      s.fields > 1
+        ? `<div class="ref-field"><label class="field-label" for="ref-field">Ich pfeife auf</label>
+             <select id="ref-field" class="input" data-ui="refField">${Array.from(
+               { length: s.fields },
+               (_, i) => `<option value="${i + 1}"${field === i + 1 ? ' selected' : ''}>${esc(s.fieldName)} ${i + 1}</option>`
+             ).join('')}</select></div>`
+        : '';
+    const upcoming = list.filter((x) => !C.isPlayed(x) && x !== m).slice(0, 3);
+    const recent = list.filter(C.isPlayed).slice(-2).reverse();
+    const small = (x) => `<li><span class="tabular">${C.formatTime(x.start)}</span><span>${esc(sideName(t, x, 'h', names).text)} – ${esc(
+      sideName(t, x, 'a', names).text
+    )}</span>${C.isPlayed(x) ? `<strong class="tabular">${x.scoreH}:${x.scoreA}</strong>` : `<small class="muted">${esc(matchTag(t, x))}</small>`}</li>`;
+
+    let main;
+    if (!m) {
+      main = `<section class="card ref-card"><p class="empty">Auf ${esc(s.fieldName)} ${field} steht im Moment kein Spiel an.${
+        list.some((x) => !C.isPlayed(x)) ? ' Die nächsten Teams stehen noch nicht fest.' : ''
+      }</p></section>`;
+    } else {
+      const draft = ui.refDrafts[m.id] || { h: 0, a: 0 };
+      const hName = sideName(t, m, 'h', names).text;
+      const aName = sideName(t, m, 'a', names).text;
+      const inSlot = t.timer && C.slotMatches(t, t.timer.matchId).some((x) => x.id === m.id);
+      const timer = inSlot
+        ? `<div class="ref-timer phase-${t.timer.phase}">
+             <div class="ref-timer-phase" data-timer-phase>${esc(C.timerPhaseLabel(t, Date.now()))}</div>
+             <div class="ref-timer-clock tabular" data-timer-clock>${C.formatClock(C.timerRemaining(t.timer, Date.now()))}</div>
+             <div class="ref-timer-flash" data-timer-flash hidden></div>
+             ${ro ? '' : `<button type="button" class="btn ${t.timer.running ? '' : 'btn-primary'}" data-action="timer-toggle">${t.timer.running ? 'Pause' : C.timerElapsed(t.timer, Date.now()) > 0 ? 'Weiter' : 'Uhr starten'}</button>`}
+           </div>`
+        : ro
+          ? ''
+          : `<button type="button" class="btn ref-timer-pick" data-action="timer-select" data-id="${esc(m.id)}">${CLOCK_ICON} Spieluhr für dieses Spiel</button>`;
+      const side = (key, name) => `<div class="ref-side">
+          <div class="ref-name">${esc(name)}</div>
+          <div class="ref-score tabular" aria-live="polite">${draft[key]}</div>
+          ${
+            ro
+              ? ''
+              : `<div class="ref-btns">
+                   <button type="button" class="ref-btn ref-minus" data-action="ref-minus" data-side="${key}" data-id="${esc(m.id)}" aria-label="${esc(name)}: ein ${esc(s.scoreUnit)} weniger"${draft[key] === 0 ? ' disabled' : ''}>−</button>
+                   <button type="button" class="ref-btn ref-plus" data-action="ref-plus" data-side="${key}" data-id="${esc(m.id)}" aria-label="${esc(name)}: ein ${esc(s.scoreUnit)} mehr">+</button>
+                 </div>`
+          }
+        </div>`;
+      const koDraw = m.phase === 'ko' && draft.h === draft.a;
+      const save = ro
+        ? ''
+        : koDraw
+          ? `<div class="ref-save"><p class="hint">Unentschieden. Wer gewinnt nach Penalty / Verlängerung?</p>
+               <div class="btn-row"><button type="button" class="btn btn-primary" data-action="ref-save" data-id="${esc(m.id)}" data-winner-side="h">${esc(hName)}</button>
+               <button type="button" class="btn btn-primary" data-action="ref-save" data-id="${esc(m.id)}" data-winner-side="a">${esc(aName)}</button></div></div>`
+          : `<div class="ref-save"><button type="button" class="btn btn-primary btn-large" data-action="ref-save" data-id="${esc(m.id)}">Resultat ${draft.h}:${draft.a} speichern</button></div>`;
+      main = `<section class="card ref-card" data-match="${esc(m.id)}">
+          <div class="ref-meta"><span class="tabular">${C.formatTime(m.start)}</span> · ${esc(fieldLabel(t, m))} · ${esc(matchTag(t, m))}</div>
+          ${timer}
+          <div class="ref-board">${side('h', hName)}<div class="ref-colon">:</div>${side('a', aName)}</div>
+          ${save}
+          ${ro ? '<p class="hint">Nur Ansicht: Für Eingaben braucht es Bearbeitungsrechte.</p>' : '<p class="hint">Der Zwischenstand bleibt auf diesem Gerät gespeichert, bis du das Resultat speicherst.</p>'}
+        </section>`;
+    }
+    return `${fieldSelect}${main}
+      <div class="cols">
+        <section class="card"><h2>Danach auf ${esc(s.fieldName)} ${field}</h2>${upcoming.length ? `<ul class="ref-list">${upcoming.map(small).join('')}</ul>` : '<p class="empty">Keine weiteren Spiele.</p>'}</section>
+        ${recent.length ? `<section class="card"><h2>Zuletzt gespielt</h2><ul class="ref-list">${recent.map(small).join('')}</ul></section>` : ''}
+      </div>`;
   }
 
   /* ------------------------------------------------------------------ */
@@ -2033,44 +2177,72 @@
         if (!(await confirmDialog('Turnier zurücksetzen?', 'Der Spielplan und alle Resultate werden gelöscht. Teams und Einstellungen bleiben erhalten.', 'Zurücksetzen', true))) return;
         mutate((x) => C.resetTournament(x));
         return;
+      case 'undo':
+        undo();
+        return;
+      case 'ref-plus':
+      case 'ref-minus': {
+        const d = Object.assign({ h: 0, a: 0 }, ui.refDrafts[id]);
+        const side = btn.dataset.side === 'a' ? 'a' : 'h';
+        d[side] = Math.max(0, Math.min(999, d[side] + (btn.dataset.action === 'ref-plus' ? 1 : -1)));
+        ui.refDrafts[id] = d;
+        saveUi();
+        render();
+        return;
+      }
+      case 'ref-save': {
+        const d = Object.assign({ h: 0, a: 0 }, ui.refDrafts[id]);
+        const m = t.matches.find((x) => x.id === id);
+        if (!m) return;
+        const ws = btn.dataset.winnerSide;
+        const winner = ws === 'h' ? m.home : ws === 'a' ? m.away : null;
+        const label = `${teamMap(t).get(m.home)} – ${teamMap(t).get(m.away)} ${d.h}:${d.a}`;
+        if (mutate((x) => C.setResult(x, id, d.h, d.a, winner), { label: 'Resultat ' + label })) {
+          delete ui.refDrafts[id];
+          saveUi();
+          render();
+          toast('Gespeichert: ' + label, 'ok');
+        }
+        return;
+      }
       case 'timer-select':
         mutate((x) => {
           if (x.timer && x.timer.matchId === id) return;
           if (x.timer) C.timerPause(x.timer, Date.now());
           x.timer = C.createTimer(x, id, CLIENT_ID);
-        });
+        }, NO_UNDO);
         return;
       case 'timer-toggle':
         mutate((x) => {
           if (!x.timer) return;
           if (x.timer.running) C.timerPause(x.timer, Date.now());
           else C.timerStart(x.timer, Date.now(), CLIENT_ID);
-        });
+        }, NO_UNDO);
         return;
       case 'timer-plus':
       case 'timer-minus':
-        mutate((x) => x.timer && C.timerAdjust(x.timer, Date.now(), btn.dataset.action === 'timer-plus' ? 60000 : -60000));
+        mutate((x) => x.timer && C.timerAdjust(x.timer, Date.now(), btn.dataset.action === 'timer-plus' ? 60000 : -60000), NO_UNDO);
         return;
       case 'timer-reset':
         mutate((x) => {
           if (x.timer) x.timer = C.createTimer(x, x.timer.matchId, CLIENT_ID);
-        });
+        }, NO_UNDO);
         return;
       case 'timer-break':
         mutate((x) => {
           if (!x.timer) return;
           C.timerBreak(x, Date.now());
           x.timer.owner = CLIENT_ID;
-        });
+        }, NO_UNDO);
         return;
       case 'timer-next':
-        mutate((x) => C.timerNext(x, CLIENT_ID));
+        mutate((x) => C.timerNext(x, CLIENT_ID), NO_UNDO);
         if (!current().timer) toast('Es gibt kein weiteres Spiel.');
         return;
       case 'timer-close':
         mutate((x) => {
           x.timer = null;
-        });
+        }, NO_UNDO);
         return;
       case 'sound-toggle':
         ui.sound = ui.sound === false;
@@ -2234,10 +2406,12 @@
         box.classList.add('is-partial');
         return; // auf das zweite Resultat warten
       }
+      const names = teamMap(current());
+      const mm = current().matches.find((x) => x.id === el.dataset.id);
       mutate((t) => {
         const m = t.matches.find((x) => x.id === el.dataset.id);
         C.setResult(t, el.dataset.id, h, a, m && m.winner);
-      }, { defer: true });
+      }, { defer: true, label: mm ? `Resultat ${names.get(mm.home) || '?'} – ${names.get(mm.away) || '?'}` : 'Resultat' });
       return;
     }
     if (el.dataset.winner) {
@@ -2281,6 +2455,13 @@
   document.addEventListener('change', onChange);
   document.addEventListener('submit', onSubmit);
   document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'z') {
+      const tag = e.target && e.target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || modalState || ui.beamer) return;
+      e.preventDefault();
+      undo();
+      return;
+    }
     if (e.key !== 'Escape') return;
     if (modalState) closeModal(null);
     else if (ui.beamer && !BEAMER_WINDOW) {
@@ -2306,4 +2487,9 @@
     if (document.visibilityState === 'visible') wakeLockTried = 0;
   });
   initLive();
+
+  // Offline-Fähigkeit für die eigene Website (z. B. GitHub Pages)
+  if (!EMBEDDED && 'serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
 })();

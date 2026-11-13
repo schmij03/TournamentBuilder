@@ -1899,3 +1899,196 @@ body.has-timer #toast-root {
     animation: none;
   }
 }
+
+/* ---------- Schiri-Ansicht ---------- */
+
+.ref-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 320px;
+}
+
+.ref-card {
+  gap: 16px;
+}
+
+.ref-meta {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.ref-board {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+}
+
+.ref-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  text-align: center;
+}
+
+.ref-name {
+  font-family: var(--font-display);
+  font-size: clamp(1.3rem, 5vw, 1.9rem);
+  font-weight: 700;
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+  min-height: 2.2em;
+  display: flex;
+  align-items: center;
+}
+
+.ref-score {
+  font-family: var(--font-display);
+  font-size: clamp(4.5rem, 20vw, 7.5rem);
+  font-weight: 700;
+  line-height: 0.9;
+}
+
+.ref-colon {
+  font-family: var(--font-display);
+  font-size: clamp(3rem, 12vw, 5rem);
+  font-weight: 700;
+  color: var(--muted);
+  padding-top: calc(2.2em * 0.4 + 10px);
+  line-height: 1;
+}
+
+.ref-btns {
+  display: flex;
+  gap: 10px;
+}
+
+.ref-btn {
+  font: inherit;
+  font-family: var(--font-display);
+  font-size: 2.2rem;
+  font-weight: 700;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  background: var(--surface-2);
+  color: var(--fg);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.ref-plus {
+  background: var(--court);
+  border-color: var(--court);
+  color: var(--court-ink);
+  width: 76px;
+  height: 76px;
+}
+
+.ref-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.ref-btn:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+.ref-save {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.ref-save .btn-large {
+  align-self: stretch;
+}
+
+.ref-timer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px 16px;
+  padding: 10px 14px;
+  border-radius: var(--radius-s);
+  background: var(--fg);
+  color: var(--bg);
+  position: relative;
+}
+
+.ref-timer-phase {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+  flex-basis: 100%;
+  text-align: center;
+}
+
+.ref-timer-clock {
+  font-family: var(--font-display);
+  font-size: 3.2rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.ref-timer-clock.is-low {
+  color: var(--accent);
+}
+
+.ref-timer-flash {
+  flex-basis: 100%;
+  text-align: center;
+  font-family: var(--font-display);
+  font-size: 1.6rem;
+  font-weight: 700;
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-radius: var(--radius-s);
+}
+
+.ref-timer-pick {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ref-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ref-list li {
+  display: grid;
+  grid-template-columns: 3.4em minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: baseline;
+}
+
+@media (max-width: 720px) {
+  .topbar {
+    position: static;
+  }
+
+  .ref-btn {
+    width: 58px;
+    height: 58px;
+  }
+
+  .ref-plus {
+    width: 70px;
+    height: 70px;
+  }
+}
